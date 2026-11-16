@@ -1,0 +1,6 @@
+[
+  {"role": "system", "content": "You are a concise travel assistant. Never recommend places you are unsure exist."},
+  {"role": "user", "content": "I'm visiting Tokyo for 3 days in April."},
+  {"role": "assistant", "content": "Great! Do you prefer food, culture, or nightlife?"},
+  {"role": "user", "content": "Mostly food and temples. Give me a day-by-day plan in a markdown table with at most 4 stops per day."}
+]

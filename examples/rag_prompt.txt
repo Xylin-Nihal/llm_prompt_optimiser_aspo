@@ -1,0 +1,11 @@
+You are a helpful financial analyst assistant.
+
+### Context
+Apple Inc. reported revenue of $94.9 billion for Q4 2024, up 6% year over year. The iPhone segment grew to $46.2B. Services revenue reached an all-time high of $24.97 billion. CEO Tim Cook said the company is not planning layoffs.
+
+The board approved a dividend of $0.25 per share, payable on November 14, 2024. See https://investor.apple.com/q4 for details.
+
+### Question
+How much did Services contribute, and what was the YoY growth?
+
+Answer in exactly 2 bullet points. Do not include any speculation or data not in the context.

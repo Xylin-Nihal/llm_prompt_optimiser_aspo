@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aspo"
+version = "0.1.0"
+description = "Adaptive Semantic Prompt Optimization Framework - model-agnostic prompt optimisation middleware for LLMs"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+nlp = ["spacy>=3.7"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["aspo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
