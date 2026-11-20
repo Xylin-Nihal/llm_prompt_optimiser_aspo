@@ -230,3 +230,49 @@ def merge_intervals(intervals) -> list[tuple[int, int]]:
         else:
             merged.append([s, e])
     return [(s, e) for s, e in merged]
+
+
+# --------------------------------------------------------------------------- Module 2
+class TaskType(str, Enum):
+    """What the prompt asks the model to do (output of the intent analyzer)."""
+
+    QA = "qa"                          # open / closed-book question answering
+    RAG_QA = "rag_qa"                  # question answered from supplied context
+    SUMMARIZATION = "summarization"
+    CODE = "code"                      # write / explain / debug code
+    REASONING = "reasoning"            # math, logic, multi-step problems
+    EXTRACTION = "extraction"          # pull structured facts out of text
+    CLASSIFICATION = "classification"  # label / categorise / sentiment
+    TRANSFORMATION = "transformation"  # translate / rewrite / proofread (input must survive)
+    CREATIVE = "creative"              # open-ended generation: stories, copy, plans, ideas
+    CHITCHAT = "chitchat"              # greetings, small talk
+
+
+@dataclass
+class IntentAnalysis:
+    task: TaskType
+    confidence: float                       # probability of ``task``
+    scores: dict[TaskType, float]           # probability per task type (sums to 1)
+    complexity: float                       # 0 (trivial) .. 1 (very demanding)
+    complexity_factors: dict[str, float]    # each factor in [0, 1]
+    features: dict[str, float]              # raw feature vector (for a learned model later)
+    signals: list[str] = field(default_factory=list)   # human-readable evidence
+
+    @property
+    def complexity_level(self) -> str:
+        return "low" if self.complexity < 0.33 else "medium" if self.complexity < 0.66 else "high"
+
+    def top(self, k: int = 3) -> list[tuple[TaskType, float]]:
+        return sorted(self.scores.items(), key=lambda kv: kv[1], reverse=True)[:k]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task": self.task.value,
+            "confidence": round(self.confidence, 4),
+            "scores": {t.value: round(p, 4) for t, p in self.top(len(self.scores))},
+            "complexity": round(self.complexity, 4),
+            "complexity_level": self.complexity_level,
+            "complexity_factors": {k: round(v, 4) for k, v in self.complexity_factors.items()},
+            "features": {k: round(v, 4) for k, v in self.features.items()},
+            "signals": self.signals,
+        }

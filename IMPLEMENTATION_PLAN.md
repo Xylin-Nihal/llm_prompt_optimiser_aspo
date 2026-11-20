@@ -1,470 +1,343 @@
-# ASPO: Adaptive Semantic Prompt Optimization Framework
-## Implementation Plan & Progress Report
+# TokenWise / ASPO: Unified Implementation & Research Plan
+
+**TokenWise** is a model-agnostic middleware that shrinks LLM prompts before they reach the model. **ASPO** (Adaptive Semantic Prompt Optimization) is the framework inside it. The core is a **learned word-removal policy** that runs inside a **validate-and-stop loop**: words are removed in batches until the validator says the next step would break the prompt, and the last passing version is sent.
+
+This plan is the single source of truth for the code and the paper. Where the paper draft and the plan disagree, the decision and the reason are recorded in §3.
+
+*Last updated: 2026-11-20 · Status: M1 Segmenter ✅ · M2 Analyzer (v1) ✅ · M0, validator, removal loop, policy ⏳*
 
 ---
 
-## 📋 Overview
+## 0. Change log
 
-**Project Goal:** Build ASPO as a final-year college research project that optimizes LLM prompts by reducing token count while preserving meaning. The optimization adapts to task type and is aware of the target model's tokenizer.
-
-**What Makes It Novel:**
-1. **Task-adaptive budget control** - Different parts of the prompt get compressed differently based on their role
-2. **Tokenizer-aware lexical optimization** - Word choices are optimized for the specific model's tokenizer
-3. **Constraint-preserving compression** - Never drops critical parts (negations, numbers, code, format rules)
-4. **Validate-and-fallback loop** - Checks meaning before sending; falls back to gentler compression if needed
-
-**Status:** Module 1 (Segmenter) ✅ COMPLETE  |  Modules 2-7 ⏳ TODO
+- **2026-11-20:** Formula references fixed to match §6. Removal unit fixed to **words** (as in LLMLingua-2); savings still counted in T_M. Policy training fixed to **one-shot REINFORCE** (as in TACO-RL), with the reward gated by H ∧ Q ∧ cos ≥ τ(C). Starting checkpoint and compute chosen (§5 M4, §7).
+- **2026-11-18 (revision):** The importance scorer (M3) and budget allocator (M4) are replaced by a **learned token-removal policy** inside a **validate-and-stop loop**. Constraint protection becomes a hard gate, not a reward term. Lexical rewriting (M5.4) and the tokenizer-aware reward are removed from the core loop and kept as optional extras. The learned policy moves from future work (§10) into the core. Earlier decisions are kept where still valid.
 
 ---
 
-## 🏗️ Architecture (7 Modules)
+## 1. Goal
+
+Reduce the input tokens (and therefore cost and latency) of real LLM requests, as far as possible while every hard constraint and the validator's checks still pass. Users should be able to adopt it with **one line of change**: point an OpenAI-compatible client at the TokenWise proxy.
+
+Two non-negotiable guarantees, for users and for the paper:
+1. **Never worse than the original, by the validator's checks.** If no compressed version passes validation, the original prompt is sent unchanged. The guarantee is about the checks, not about task accuracy.
+2. **Hard spans are never removed.** Negations, constraints, format rules, questions, code and placeholders survive byte-for-byte. The policy cannot remove them.
+
+---
+
+## 2. Contributions (what the paper claims)
+
+| # | Contribution | Evidence in the paper |
+|---|---|---|
+| **C1** | **Role-aware segmentation with two-tier protection.** Arbitrary prompts and chat transcripts are split automatically into 11 roles. Instruction-type spans are *hard-protected*. Content spans are *soft-protected*: never altered, but a span may be removed as a whole. | Segmenter accuracy on hand-labelled prompts; constraint-violation rate (RQ4); "no protection" ablation |
+| **C2** | **Validator-controlled learned removal policy.** A word-level policy (the same unit as LLMLingua-2) removes words in batches. The stopping point is set by the validator, so each prompt gets the most compression that still passes the checks, instead of a fixed or hand-set ratio. | RQ1: maximal-under-validator vs fixed ratio at matched quality; quality–ratio curves |
+| **C3** | **Target-tokenizer accounting.** All savings are reported in the target model's tokens and cost, not generic counts. Tokenizer-aware lexical rewriting is an optional extra, reported separately. | Savings per tokenizer (three tokenizers); optional lexical-rewrite ablation |
+| **C4** | **Run-time validate-and-stop loop.** A complexity-dependent similarity threshold τ(C), NLI equivalence for rewritten instructions, and hard-span and question/format checks decide when to stop. The last passing version is restored. | RQ3: failure rate with vs without the validator; validator precision and recall against human labels; validator-frequency cost |
+| **C5** | **Deployable middleware.** OpenAI-compatible proxy, Python library, CLI and dashboard, with a per-request report (token reduction, compression ratio, cost saved, similarity, stop reason). | Latency and break-even analysis (formula (6)); batch-size sweep; case study |
+
+**Novelty statement (honest version).** LLMLingua-2 and LLM-DCP learn which tokens to drop, but neither protects constraints at the policy level, neither uses a runtime validator to decide how far to compress, and neither optimises for the target tokenizer. LLMLingua and LongLLMLingua need the user to split the prompt into parts by hand, and they have no runtime check. ASPO combines automatic role detection, a hard constraint gate inside the policy, a validator that decides the stopping point, and target-tokenizer accounting. No surveyed method does all of these together. The learned policy itself is close to LLM-DCP and TACO-RL, so the paper must not claim the policy as new.
+
+---
+
+## 3. What we took from where
+
+| Topic | Paper draft | Original plan | **Decision** | Why |
+|---|---|---|---|---|
+| Segmentation | Sentences only | 11 roles + protected spans | **11 roles** (built) | Role-awareness is the main differentiator and works |
+| Protection | Any span with a protected item is undeletable | Spans kept, text around them compressible | **Two tiers, hard gate** | Simple and testable; the policy masks hard spans |
+| Intent detection | Prototype embeddings + rules | Embeddings + LR, then DeBERTa | **Rules (built) + prototypes** | No labelled training data yet; DeBERTa is out of scope |
+| Complexity | Eq. 2: 4 terms | Not formalised | **Six-factor formula** (§6) | Built and tested |
+| Importance | Leave-one-out drift per segment | Token self-info + relevance + classifier | **Learned word-level policy** (main); LOO + relevance kept as the pilot scorer | The paper claims the learned policy; the pilot scorer proves the loop works first |
+| Budget | One global r(C) | Per-segment rule table → bandit | **Validator decides the stop point**; per-segment budget removed | Removes the hand-set table that reviewers would challenge |
+| Optimizers | Dedup, filler, deletion, lexical | Plus restructuring, MinHash, LLM rewrite | **Normalize (filler, whitespace, JSON minify) → removal loop**; lexical rewrite optional | Lexical rewrite gives small savings and risks meaning |
+| Validator | cos ≥ τ(C), restore, fallback | Fixed cos + NLI + span checks | **Merged, run inside the loop** | Each step must be checked, not only the final output |
+| Serving | LangChain + Streamlit | LiteLLM + FastAPI + Streamlit | **LiteLLM + FastAPI proxy + Streamlit** | The proxy makes the "middleware" claim real |
+| Datasets | Arxiv, ShareGPT, GSM8K, BBH | Many | **Paper's 4 + LongBench + constraint-stress set** | Matches LLM-DCP for direct comparison |
+| Baselines | SC, LLMLingua, LLMLingua-2, LLM-DCP | Union | **Union + TACO-RL** | TACO-RL is the closest RL baseline |
+| Statistics | Point estimates | CIs, tests | **CIs and paired tests** | Needed for acceptance |
+| Cache-awareness | Future work | Strongly recommended extra | **`prefix_freeze` option**, evaluated only if time allows | Cheap; useful to users |
+
+---
+
+## 4. Architecture
 
 ```
-User Prompt
-    ↓
-[1] SEGMENTER (DONE) ─► splits into roles, marks protected spans
-    ↓
-[2] INTENT ANALYZER (TODO) ─► classifies task type & complexity
-    ↓
-[3] IMPORTANCE SCORER (TODO) ─► scores which parts matter most
-    ↓
-[4] STRATEGY SELECTOR (TODO) ─► decides compression ratio per segment
-    ↓
-[5] OPTIMIZERS (TODO) ─► restructure, deduplicate, rewrite words, compress
-    ↓
-[6] QUALITY VALIDATOR (TODO) ─► checks meaning preserved, falls back if needed
-    ↓
-[7] MODEL ADAPTER (TODO) ─► sends to OpenAI/Ollama/etc
-    ↓
-Optimized Prompt → Target LLM
+ App / user ──► [Proxy · Library · CLI · Dashboard]                          (M8)
+                       │
+                       ▼
+ [M0 Tokenizer layer: T_M(·), prices]  ◄── used by every stage below
+                       │
+ [Gate] T_M(P) < T_min ? ──yes──► send P unchanged
+                       │ no
+ [M1 Intake + Segmenter] roles, hard/soft spans                              ✅
+ [M2 Intent & Complexity Analyzer] task, C ∈ [0,1]                           ✅ v1
+ [M5.1 Normalize] whitespace, filler, JSON minify (no content removed)
+                       │
+ [M5.2 Removal loop]  ◄── policy π_θ (learned, RL-trained) or pilot scorer M3
+        repeat: score removable words → remove a batch of k words
+                → [M6 Validator]  pass: keep and continue
+                                  fail: restore last passing text, stop
+                       │
+ [M6 Final check] hard spans verbatim, question and format present
+                       │
+ [M7 Model Adapter] LiteLLM → OpenAI / Anthropic / Gemini / Ollama …
+                       │
+ [Report] tokens before/after, TR, CR, $ saved, stop reason, steps, latency
 ```
 
----
-
-## ✅ MODULE 1: SEGMENTER (COMPLETED)
-
-**What it does:** Splits a prompt into functional parts and identifies text that must never be deleted.
-
-### Files Created
-
-#### [aspo/types.py](aspo/types.py) - Core Data Structures
-**Purpose:** Defines all types shared across modules
-
-**Key Classes:**
-- `SegmentRole` (enum): `SYSTEM`, `INSTRUCTION`, `CONTEXT`, `EXAMPLE`, `QUESTION`, `FORMAT`, `CODE`, `DATA`, `HISTORY`, `TOOL_OUTPUT`, `OTHER`
-- `SpanKind` (enum): `CODE`, `URL`, `EMAIL`, `PATH`, `PLACEHOLDER`, `QUOTED`, `DATE`, `NUMBER`, `ENTITY`, `NEGATION`, `CONSTRAINT`, `FORMAT`
-- `ProtectedSpan`: A region of text [start, end] with a reason it must survive (e.g., `NEGATION`, `CONSTRAINT`)
-- `Segment`: One piece of a prompt with a role, body text, protected spans, and metadata
-- `SegmentedPrompt`: The full result - list of segments + ability to reconstruct original text
-
-**Why it matters:** Every module after the segmenter works with segments, not raw text. The offset system is relative (within each segment), so modules never need the full prompt.
+Offline, the **policy training** loop (§7) produces π_θ. Online, π_θ is used only inside the removal loop.
 
 ---
 
-#### [aspo/lexicon.py](aspo/lexicon.py) - Word Lists
-**Purpose:** Hand-curated word lists used by the segmenter's heuristics
+## 5. Modules
 
-**Contains:**
-- `IMPERATIVE_VERBS` - action words (summarize, analyze, explain, etc.)
-- `FORMAT_VERBS` - output-format indicators (respond, format, output, etc.)
-- `QUESTION_WORDS` - question starters (what, why, how, who, etc.)
-- `SECTION_KEYWORDS` - maps labels to roles ("Context:" → CONTEXT, "Question:" → QUESTION)
-- `PAIR_INPUT_LABELS` / `PAIR_OUTPUT_LABELS` - few-shot pair markers (Q:/A:, Input:/Output:, etc.)
-- `PERSONA_PREFIXES` - system role indicators ("You are a...", "Act as...")
-- Various other patterns for entity detection, negations, constraints
+### M0 — Tokenizer layer `aspo/tokenizers.py` ⏳ (next)
+- `count_tokens(text, model) -> int`: `tiktoken` for OpenAI models; Hugging Face `AutoTokenizer` for open models (Llama-3.1, Qwen2.5). For closed models without a public tokenizer, use the provider's counting endpoint if one exists; otherwise a documented approximation, flagged in the report.
+- `price_per_token(model)`: input price from LiteLLM's cost table.
+- LRU cache on encodings, since the removal loop calls it at every step.
+- Tests: counts match the official tokenizers on fixed strings.
+- Knock-on: the analyzer's length factor switches from words to `T_M` tokens.
 
-**Why it matters:** These lists guide the segmenter's role classification. They're language-specific, so future multi-language support would start here.
+### M1 — Intake + Segmenter `aspo/segmenter.py`, `aspo/protected.py` ✅
+Built and tested (§12). Still to add:
+- Intake checks: non-empty, maximum-length limit, simple language check. Non-English prompts use a "safe" preset (removal limited to filler only) until the multilingual extension.
+- **Two-tier protection** (span kinds are already detected; the tier mapping is new):
+  - **Hard:** NEGATION, CONSTRAINT and FORMAT spans in any role; every detected protected span inside INSTRUCTION, QUESTION, FORMAT or SYSTEM segments, whatever its kind; CODE blocks; PLACEHOLDERs anywhere. These are never removed or altered. The policy masks them out. Only the spans are hard, not the whole segment: the other words in an INSTRUCTION, QUESTION, FORMAT or SYSTEM segment can still be removed, and the NLI check (N in formula (9)) guards those removals. The Q check only requires that each QUESTION and FORMAT segment is not removed entirely.
+  - **Soft:** NUMBER, DATE, ENTITY, URL, EMAIL, PATH and QUOTED spans in CONTEXT, DATA, HISTORY, TOOL_OUTPUT or EXAMPLE segments. Each soft span is an **atomic unit**: all of its words are removed together or none are, so it is always either verbatim or entirely gone, never altered. Soft-span retention is reported as a metric.
 
----
+### M2 — Intent & Complexity Analyzer `aspo/analyzer.py` ✅ v1
+Built: 10 task types, role-weighted lexical cues plus structural features, a softmax, a six-factor complexity score, explanation signals and a feature vector (§12). To add:
+- Length factor in target-model tokens (after M0).
+- **Prototype-embedding scorer:** 5–10 prototype prompts per task, embedded with `all-MiniLM-L6-v2`. The cosine to each task centroid is added to the rule logits (formula (2b) in §6). Optional dependency; falls back to rules only.
+- **Analyzer evaluation set:** 400 prompts from LMSYS-Chat-1M or ShareGPT, labelled independently by two people. Report Cohen's κ and macro-F1 for rules-only vs rules + prototypes. This is a paper table.
+- Role in the new design: the analyzer supplies the task type and C, which set the validator's strictness through τ(C).
 
-#### [aspo/protected.py](aspo/protected.py) - Protected Span Detection
-**Purpose:** Identify text that must never be deleted (negations, constraints, code, numbers, etc.)
+### M3 — Pilot removal scorer `aspo/scorer.py` ⏳ (built before the policy)
+- A simple, cheap scorer for the removal loop. It is used to test the loop and as the **pilot baseline**.
+- Word score: inverse document frequency over the prompt, or leave-one-out drift at sentence level (formula (1)). The lowest-scoring words are removed first.
+- Purpose: prove that the loop and the validator work before the policy is trained, and provide a non-learned baseline for the ablations.
 
-**Key Functions:**
-- `detect_protected_spans(text)` - Main entry point. Returns list of `ProtectedSpan` objects
-- `spacy_available()` - Checks if spaCy is installed for better NER
+### M4 — Learned removal policy `aspo/policy.py`, `training/` ⏳ (after the pilot)
+- **Unit of removal: words.** A word is a whitespace-separated unit with its attached punctuation, the same unit LLMLingua-2 drops. The encoder works on subwords, and a word's score is the mean of its subword scores. A word that overlaps a hard span counts as hard. The words of a soft span form one removal unit, scored by the mean over its words and removed all together or not at all. Savings are still counted in target-model tokens T_M, so the policy does not depend on one target tokenizer (needed for the transfer test in RQ2).
+- Architecture: an LLMLingua-2-style token classifier, meaning a transformer encoder with a per-token keep/drop head.
+- **Starting checkpoint:** `microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank` (multilingual BERT-base, about 180M parameters). The XLM-RoBERTa-large checkpoint (`microsoft/llmlingua-2-xlm-roberta-large-meetingbank`) is an optional extra run if time and GPU quota allow. Confirm both against the LLMLingua-2 paper and model cards.
+- Input: the current (partly compressed) prompt, with a role tag per word and a hard-span mask.
+- Output: π_θ(keep | word) for each removable word.
+- **Hard-span masking:** words that overlap hard spans are forced to keep. The policy cannot remove them.
+- **Training: one-shot REINFORCE, as in TACO-RL** (formula (14)). For each training prompt, the policy samples keep/drop for every removable word in a single pass. The one resulting candidate gets one reward (formula (12)), and the policy is updated with a mean-reward baseline. The iterative loop is used only at inference. Limitation to state in the paper: the policy is trained one-shot but run iteratively.
+- **Reward gate in training:** H ∧ Q ∧ cos(e(P), e(P′)) ≥ τ(C), which is the validator without NLI. NLI is left out of training to keep it cheap. No LLM API calls are made during training.
+- Inference: the π_θ scores pick the k lowest-scoring removable words at each step. The classifier is re-run on the current prompt at each step, so the iterative cost is linear in the number of steps.
+- **Compute:** development, debugging and short runs happen on the laptop (RTX 4050 Laptop, 6 GB VRAM: enough for mBERT-base with fp16 and small batches, plus MiniLM for the reward). Full training runs on Kaggle (free 16 GB T4 or P100; check the current weekly GPU quota and session limit). Colab free is the fallback. Save checkpoints regularly so a session limit does not lose work.
 
-**Detection Methods (in priority order):**
+### M5 — Normalize and removal loop `aspo/optimizers.py` ⏳
+1. **Normalize** (no content removed): collapse repeated whitespace and blank lines; remove a curated list of filler and politeness phrases ("could you please kindly…", "I was wondering if…") outside protected spans and code; JSON minify (never Python or YAML, where whitespace matters).
+2. **Removal loop** (formulas (10) and (11)): repeat, starting from the normalized prompt, until the validator fails or no removable word is left:
+   - score the removable words with the active scorer (M3 pilot or M4 policy);
+   - remove the k lowest-scored removable words;
+   - validate every f steps (f = 1 in the pilot);
+   - on failure, restore the last passing text and stop.
+3. **Optional lexical rewrite** (an extra, not a core claim): verbose-to-concise phrase substitutions, accepted only if they save tokens under the target tokenizer and pass NLI. Reported as a separate ablation.
 
-| Type | Pattern | Why Protected |
-|------|---------|---------------|
-| **CODE** | ` ```python ... ``` ` or `` `code()` `` | Deleting code changes meaning |
-| **URL** | `https://example.com` | Link validity |
-| **EMAIL** | `user@domain.com` | Contact info |
-| **PATH** | `/src/main.py`, `config.yaml` | File references |
-| **PLACEHOLDER** | `{name}`, `{{var}}`, `<tag>`, `$VAR` | Template variables |
-| **QUOTED** | `"string"`, `'text'` | Literal values |
-| **DATE** | `2024-03-15`, `March 15, 2024` | Temporal references |
-| **NUMBER** | `$94.9 billion`, `v1.2.3`, `3.5 ms` | Quantities and versions |
-| **ENTITY** | `Apple Inc`, `Paris`, `NASA` | Named entities (uses spaCy if available, else regex) |
-| **NEGATION** | "Do not do X" | Clause containing "not", "never", etc. - flipping it changes meaning |
-| **CONSTRAINT** | "Must be under 300 words" | Sentence with "must", "only", "at most", etc. |
-| **FORMAT** | "Respond in JSON" | Output format instructions |
+### M6 — Validator `aspo/validator.py` ⏳
+A candidate P′ passes (formula (9)) only if all of these hold:
+1. every hard span is present verbatim;
+2. every QUESTION and FORMAT segment is still present;
+3. cos(e(P), e(P′)) ≥ τ(C);
+4. every instruction-bearing segment changed by a removal or rewrite passes bidirectional NLI entailment against its original (`cross-encoder/nli-deberta-v3-small`, p ≥ 0.8).
 
-**Tokenizer Awareness Note:** This module is pre-tokenizer. The next module (tokenizer layer) will count actual tokens.
+Final check (after the loop): repeat checks 1–2 on the output, to catch any bug in the loop. If it fails, send the original P and log the reason.
 
----
+Validator frequency f: 1 in the pilot. Later, f is measured (for example 1, 2, 4, 8), and the accuracy loss and cost of each setting are reported.
 
-#### [aspo/segmenter.py](aspo/segmenter.py) - Main Segmenter
-**Purpose:** Split prompts into segments and attach protected spans to each
+### M7 — Model Adapter `aspo/adapters.py` ⏳
+LiteLLM, giving one interface for OpenAI, Anthropic, Gemini and Ollama. Passes streaming through unchanged. Tells M0 which tokenizer and prices apply to the target model.
 
-**Key Class: `Segmenter`**
-
-**How it works:**
-
-1. **Explicit Structure Detection** (strongest signal)
-   - Markdown headers: `## Question` → role = `QUESTION`
-   - XML tags: `<document>...</document>` → role from tag name
-   - Code fences: ` ```python ... ``` ` → role = `CODE`, fully protected
-   - Inline labels: `Question: How old is the Earth?` → role + body text
-
-2. **Few-Shot Pair Detection**
-   - Recognizes `Q:/A:`, `Input:/Output:`, `Review:/Sentiment:` patterns
-   - A pair with empty output is the open query (user's actual question)
-
-3. **Content Heuristics** (when no explicit structure)
-   - Starts with imperative verb? → `INSTRUCTION`
-   - Starts with persona phrase? → `SYSTEM`
-   - Ends with `?` → `QUESTION`
-   - Long paragraph (60+ words)? → `CONTEXT`
-   - Looks like JSON/CSV? → `DATA`
-   - Looks like code? → `CODE`
-
-4. **Position-Based Logic**
-   - Final unit of the prompt gets priority for `QUESTION` role
-   - Trailing request at end of long paragraph gets split off (e.g., "Here's my situation... Could you write X?" → CONTEXT + INSTRUCTION)
-
-5. **Chat Message Handling**
-   - System messages → `SYSTEM`
-   - Earlier user/assistant turns → `HISTORY`
-   - Tool outputs → `TOOL_OUTPUT`
-   - Final user message → fully segmented
-   - Image/tool-call parts → passed through untouched
-
-**Key Methods:**
-- `segment(prompt)` - Entry point. Accepts string or list of chat messages.
-- `segment_text(text)` - Plain text input
-- `segment_messages(messages)` - OpenAI-style chat format
-- `to_text(replacements)` - Rebuild the original prompt (or modified version if replacements given)
-- `to_messages(replacements)` - Rebuild chat format
-
-**Output Type: `SegmentedPrompt`**
-- `.segments` - list of `Segment` objects
-- `.sources` - original text pieces
-- `.messages` - original messages (if chat input)
+### M8 — Delivery surfaces ⏳
+- **Library:** `aspo.optimize(prompt, model, preset="balanced") -> (optimized, report)` in `aspo/pipeline.py`.
+- **OpenAI-compatible proxy** `server.py` (FastAPI): `POST /v1/chat/completions`. Optimizes the final user message (and history or tool outputs). Adds `X-TokenWise-*` headers with savings and stop reason. Usage: `OpenAI(base_url="http://localhost:8000/v1")`.
+- **CLI:** `python -m aspo optimize file.txt --model gpt-4o-mini`.
+- **Dashboard** `dashboard.py` (Streamlit): side-by-side diff with removed text highlighted, per-segment roles, validator results per step, stop reason, a preset slider, and token and cost savings.
+- **Safeguards:** overhead gate, fallback guarantee, no logging by default (logs are opt-in and stored locally), and a `prefix_freeze` option that leaves the system prompt and tool definitions untouched so provider prompt caching keeps working.
 
 ---
 
-#### [aspo/__init__.py](aspo/__init__.py) - Package Exports
-**Purpose:** Makes `from aspo import segment` work
-
-**Exports:**
-- `Segmenter`, `SegmenterConfig` - Classes
-- `segment()` - Main function
-- `detect_protected_spans()` - Protected span detector
-- `Segment`, `SegmentedPrompt`, `SegmentRole`, `SpanKind`, `ProtectedSpan` - Data types
-
----
-
-#### [aspo/__main__.py](aspo/__main__.py) - CLI Entry Point
-**Purpose:** Makes `python -m aspo` work from command line
-
-**Usage:**
-```bash
-python -m aspo examples/rag_prompt.txt          # table view
-python -m aspo examples/rag_prompt.txt --json   # JSON output
-python -m aspo examples/chat.json               # chat messages
-```
-
----
-
-### Tests Created
-
-#### [tests/test_protected.py](tests/test_protected.py)
-**48 test cases covering:**
-- Offset accuracy (offset recovered matches original text)
-- Code fences and inline code
-- URLs, emails, file paths
-- Numbers with units (`$94.9 billion`, `1,200 words`, `v1.2.3`)
-- Dates (ISO, English, time formats)
-- Placeholders (`{var}`, `<tag>`, `$VAR`, etc.)
-- Quoted strings (handles apostrophes correctly)
-- Negations (protects whole clause around "not", "never", etc.)
-- Constraints ("must", "only", "at most", etc.)
-- Format sentences ("respond in JSON", "markdown table", etc.)
-- Filtering by kind (test only one type at a time)
-- Entities and sentence-initial verb filtering
-
----
-
-#### [tests/test_segmenter.py](tests/test_segmenter.py)
-**48 test cases covering:**
-- Exact text reconstruction after segmentation
-- Protected span offsets relative to segment
-- RAG/markdown structure (headers carry roles forward)
-- Inline labels and answer cues ("A:")
-- XML tag blocks
-- Few-shot pairs and open queries
-- Code blocks (fully protected)
-- Long paragraph splitting trailing questions
-- JSON/CSV data detection
-- Constraint protection (only in instruction roles)
-- Negation protection (everywhere)
-- Entity stopword filtering
-- Chat input (multiple message types)
-- Chat roundtrip and message part replacement
-- Casual prompts with trailing requests
-
----
-
-### Examples Created
-
-#### [examples/rag_prompt.txt](examples/rag_prompt.txt)
-Financial RAG prompt with context, question, and format instructions
-
-#### [examples/chat.json](examples/chat.json)
-Chat messages showing system prompt, conversation history, and final multi-part user message
-
----
-
-### Test Results
-✅ **All 48 tests pass** (0.11 seconds)
-
----
-
-## 📊 Current Project Structure
+## 6. Formal model (keep the paper and the code identical)
 
 ```
-llm_prompt_optimiser/
-├── .gitignore                          # Python/pytest ignores
-├── pyproject.toml                      # Package metadata
-├── README.md                           # Quick start guide
-├── IMPLEMENTATION_PLAN.md              # This file
-│
-├── aspo/                               # Main package
-│   ├── __init__.py                     # Exports
-│   ├── __main__.py                     # CLI (python -m aspo)
-│   ├── types.py                        # Core data structures (200 lines)
-│   ├── lexicon.py                      # Word lists (100 lines)
-│   ├── protected.py                    # Protected span detection (300 lines)
-│   └── segmenter.py                    # Segmenter (600 lines)
-│
-├── tests/
-│   ├── test_protected.py               # 48 unit tests
-│   └── test_segmenter.py               # 48 unit tests
-│
-├── examples/
-│   ├── rag_prompt.txt                  # Financial RAG example
-│   └── chat.json                       # Chat message example
-│
-└── .venv/                              # Python virtual environment
+        e(·) = all-MiniLM-L6-v2 sentence embedding; T_M(·) = token count under target model M; a "word" is a whitespace unit with attached punctuation
+(1)   I(u)     = α·[1 − cos(e(P), e(P∖u))] + (1−α)·cos(e(u), e(q))        pilot scorer (M3)
+(2)   C        = Σ_k w_k·f_k ,  Σ w_k = 1,  k ∈ {task, reasoning, constraints, length, technical, structure}
+        f_length      = min(1, log(1+T_M(P)) / log(1+T_ref))
+        f_task        = Σ_t p(t|P)·κ_t
+        f_constraints = min(1, n_hard_instruction_spans / 6)
+        f_technical   = min(1, 2·|tech-span chars| / |P|)
+        f_reasoning   = min(1, 0.25·n_multistep_cues + 0.15·(n_subtasks − 1))
+        f_structure   = min(1, (n_distinct_roles − 1) / 5)
+        current weights: 0.25, 0.20, 0.15, 0.15, 0.15, 0.10 (tuned on the validation split)
+(2b)  p(t|P)   = softmax(rule_t + β·cos(e(P), μ_t))                        prototype term (M2, optional)
+(3)   τ(C)     = τ0 + (τ1 − τ0)·C ,   τ0 = 0.80,  τ1 = 0.95
+(4)   TR       = (1 − T_M(P′)/T_M(P))·100%
+(5)   CR       = T_M(P) / T_M(P′)
+(6)   worthwhile iff  t_ASPO + t_LLM(P′) < t_LLM(P);   ΔCost = (T_M(P) − T_M(P′))·p_in        (Eq. 9 in the paper draft)
+(7)   w*       = argmin_{w′∈W(w)} T_M(w′)  s.t.  T_M(w′) < T_M(w),  sim(w, w′) ≥ δ_lex       optional lexical rewrite
+(8)   Gate:    T_M(P) < T_min (default 200) → return P unchanged
+(9)   V(P′)    = 1  iff  H(P′) ∧ Q(P′) ∧ [cos(e(P), e(P′)) ≥ τ(C)] ∧ N(P′)
+        H: every hard span present verbatim
+        Q: every QUESTION and FORMAT segment present
+        N: bidirectional NLI entailment, p ≥ 0.8, for every changed instruction segment
+(10)  Removal loop:  P_0 = Normalize(P);  for t = 1, 2, …
+        R_t   = removable units of P_{t−1}       (words not overlapping a hard span; each soft span = one unit)
+        k_t   = max(1, ⌈0.05·|R_t|⌉) units        (default; swept over fixed k ∈ {1, 4, 16, 64})
+        P_t   = P_{t−1} with the k_t lowest-scored units removed
+        score(w) = π_θ(keep | w)  (policy, formula (13))  or  I(w)  (pilot)
+        stop at the first t where V(P_t) = 0
+(11)  Stop point:  t* = max{ t : V(P_s) = 1 for all s ≤ t };   output P_{t*}
+(12)  Reward (per candidate P′, used in training and tuning):
+        R(P′) = G(P′) · [ w_c · (T_M(P) − T_M(P′)) / T_M(P)  +  w_q · cos(e(P), e(P′)) ]
+        G(P′) = 1  iff  H(P′) ∧ Q(P′) ∧ [cos(e(P), e(P′)) ≥ τ(C)]   (the validator (9) without N); otherwise 0
+        With hard-span masking on, H and Q always hold, so the τ(C) term is what rejects candidates;
+        H and Q matter in the "masking off" ablation.
+        w_c + w_q = 1;  grid over w_c ∈ {0.5, 0.6, 0.7, 0.8, 0.9}, tuned on the validation split
+(13)  Policy:  π_θ(keep | w_i) = mean_{j ∈ w_i} σ(f_θ(x)_j)   (mean over the subwords j of word w_i)
+        words overlapping a hard span are fixed to keep (π = 1)
+        a soft span is one unit: π_θ(keep | span) = mean over its words; in (14) one action a is sampled per soft span
+(14)  REINFORCE (one-shot, as in TACO-RL):
+        a_i ~ Bernoulli(π_θ(keep | w_i)) for every removable word i;   P′ = the words with a_i = keep
+        ∇_θ J = E[ (R(P′) − b) · Σ_i ∇_θ log π_θ(a_i | x) ],  b = mean reward over the batch
+        The policy is trained one-shot and run iteratively by (10) at inference (a stated limitation).
 ```
 
+Note on formula (11): the stop point assumes that once a step fails, later steps would also fail. This is not guaranteed. State it as a limitation in the paper. An alternative is to keep going after a failure and retain the best passing version, at higher cost.
+
 ---
 
-## 🔄 What Happens When You Run The Segmenter
+## 7. Training and tuning (decisions)
 
-### Example 1: Simple RAG Prompt
+| Decision | Choice |
+|---|---|
+| Granularity | word-level policy, as in LLMLingua-2: subword scores averaged per word, whole words removed, savings counted in T_M |
+| Batch size k | start at about 5% of removable words per step; sweep fixed values {1, 4, 16, 64} for the latency-versus-compression curve |
+| Validator frequency f | every step in the pilot; once the pilot is stable, sweep f and measure accuracy loss and cost for each setting |
+| Constraints | hard gate (formula (12), G), not a weighted reward term |
+| Training mode | one-shot REINFORCE, as in TACO-RL: one sampled candidate per prompt, one reward; the iterative loop is used only at inference |
+| Reward gate | H ∧ Q ∧ cos ≥ τ(C), i.e. the validator without NLI (NLI too costly in training) |
+| Starting checkpoint | LLMLingua-2 multilingual BERT-base; XLM-RoBERTa-large as an optional extra run |
+| Compute | laptop RTX 4050 (6 GB VRAM) for development and short runs; Kaggle (16 GB GPU) for full training; Colab as fallback |
+| Reward weights | w_c and w_q only; tuned on the validation split with the grid above; never on the test split |
+| Policy training data | training split of the datasets in §8, role-labelled by M1 |
+| Hyperparameters | τ0, τ1, T_min, δ_lex, the complexity weights, k, f and w_c are all tuned on the 20% validation split |
+
+Order of work (so the policy is not trained before the loop is correct):
+1. Build M0 and the validator, with unit tests for each check.
+2. Build the removal loop with the pilot scorer M3. Check that stop-and-restore works on the example prompts.
+3. Run the pilot comparison against LLMLingua-2 on one dataset (go / no-go decision).
+4. Train the policy M4 with REINFORCE, and compare it with the pilot scorer.
+
+---
+
+## 8. Evaluation (the core of the paper)
+
+**Research questions**
+- **RQ1:** At matched quality, does the validator-controlled loop achieve more compression than a fixed-ratio baseline?
+- **RQ2:** Does target-tokenizer accounting change the reported savings, and does a policy trained for one tokenizer transfer to another?
+- **RQ3:** How much does the validator reduce quality failures, and what does it cost in latency and savings? Measured by validator precision and recall against human labels, failure rate with and without the validator, and a validator-frequency sweep.
+- **RQ4:** Does hard-span masking reduce constraint violations compared with baselines that do not protect constraints? Measured at prompt level (deterministic) and at output level (IFEval checkers).
+- **RQ5 (optional):** Does `prefix_freeze` lower effective cost when provider caching is on?
+
+**Datasets** (200 test items each, plus a separate 20% validation split for tuning)
+
+| Task family | Dataset | Quality metric | Why |
+|---|---|---|---|
+| Summarization | Arxiv-March23 | ROUGE-L, BERTScore | Same as LLM-DCP |
+| Conversation | ShareGPT | ROUGE-L, BERTScore | Same as LLM-DCP |
+| Math reasoning | GSM8K (few-shot CoT prompt) | Exact match | Same as LLM-DCP |
+| In-context learning | BBH (6 tasks) | Exact match | Same as LLM-DCP |
+| RAG / long context | LongBench (HotpotQA, MultiFieldQA subsets) | F1 | Tests the validator and role-aware protection |
+| Constraint stress | 150 items from the sets above, each with one IFEval-style verifiable instruction appended | Constraint-violation rate | Tests C1 and C4 |
+
+**Target models (three tokenizers):** one low-cost OpenAI model, plus Llama-3.1-8B-Instruct and Qwen2.5-7B-Instruct through Ollama. Temperature 0; all responses cached.
+
+**Baselines:** no compression · random word removal (same ratio as ASPO) · truncation · Selective Context · LLMLingua · LongLLMLingua (RAG set only) · LLMLingua-2 · LLM-DCP · TACO-RL · the pilot loop (M3) without the learned policy.
+
+**Metrics:** TR, CR, $ saved (current list prices), latency (t_ASPO, t_LLM, total, break-even prompt length from formula (6)), task quality, cos(e(P), e(P′)), validator acceptance and fallback rates, validator precision and recall against human labels, hard-span retention (must be 100%), soft-span retention, constraint-violation rate at prompt and output levels, stop-reason distribution, steps taken.
+
+**Ablations:**
+- Fixed-ratio stop vs validator stop (RQ1, RQ3)
+- Learned policy vs pilot scorer M3
+- Hard-span masking on vs off (RQ4)
+- Validator on vs off; cosine-only vs cosine + NLI (RQ3)
+- Validator frequency f ∈ {1, 2, 4, 8} (cost vs accuracy)
+- Batch size k ∈ {1, 4, 16, 64} and the default 5% (latency vs compression)
+- Analyzer rules-only vs rules + prototypes
+- Optional: with vs without lexical rewrite (C3)
+
+**Statistics:** three seeds for any sampling; 95% bootstrap confidence intervals; paired bootstrap (ROUGE, F1) or McNemar's test (exact match and constraint violations) against the best baseline; cost–quality Pareto curves across the presets and extra ratio settings.
+
+**Integrity rule:** no number goes into the paper unless it is produced by `eval/run_benchmark.py` and saved in `results/`.
+
+---
+
+## 9. Roadmap (relative weeks from now)
+
+| Weeks | Work | Done when |
+|---|---|---|
+| 1–2 | M0 tokenizer layer; validator with unit tests; analyzer length factor in tokens; two-tier protection mapping; start the 400-prompt labelling. In parallel: fix the paper text (see `PAPER_REVISIONS.md`) | Token counts match official tokenizers; each validator check has a test |
+| 3–4 | Removal loop with pilot scorer M3; normalize (M5.1); pilot comparison vs LLMLingua-2 on one dataset | Stop-and-restore works on example prompts; go / no-go decision recorded |
+| 5–7 | Policy M4 training with REINFORCE; hard-span masking; reward grid on the validation split; analyzer κ and F1 | Policy beats the pilot scorer on the validation split |
+| 8–9 | M7 adapter; M8 proxy, CLI, dashboard | An OpenAI SDK pointed at the proxy works end to end — **usable v1, mid-term demo** |
+| 10–13 | Full eval harness; baselines (incl. TACO-RL and LLM-DCP); main runs; ablations; batch and frequency sweeps; statistics | `results/*.csv` and plots generated by script |
+| 14–16 | Fill the paper with real results, final edit, submit; viva prep | Paper submitted |
+
+If the go / no-go decision in weeks 3–4 is "no", the paper's claims move to C1, C4 and RQ4, and the compression result is presented as a trade-off.
+
+---
+
+## 10. Out of scope (future work in the paper)
+
+Contextual-bandit or RL budget policy over segments · fine-tuned DeBERTa analyzer · LLM-based rewriting and template restructuring · multilingual "token tax" study · agent-loop mode · user-feedback threshold tuning · full cache-aware optimization beyond `prefix_freeze` · lexical rewriting as a main contribution (kept as an optional extra).
+
+---
+
+## 11. Project structure (target)
+
 ```
-Input file: examples/rag_prompt.txt
-
-You are a helpful financial analyst assistant.
-
-### Context
-Apple Inc. reported revenue of $94.9 billion for Q4 2024, up 6% year over year.
-
-The board approved a dividend of $0.25 per share, payable on November 14, 2024.
-
-### Question
-How much did Services contribute, and what was the YoY growth?
-
-Answer in exactly 2 bullet points. Do not include any speculation.
+aspo/
+  types.py lexicon.py protected.py segmenter.py     ✅
+  analyzer.py                                       ✅ v1
+  tokenizers.py validator.py scorer.py policy.py optimizers.py
+  adapters.py pipeline.py __init__.py __main__.py
+server.py          # FastAPI OpenAI-compatible proxy
+dashboard.py       # Streamlit demo
+training/          # policy training (REINFORCE), reward grid search
+eval/  datasets.py baselines.py metrics.py run_benchmark.py
+data/  analyzer_labels.csv   (400 hand-labelled prompts)
+results/           (generated only)
+tests/ one test file per module
 ```
 
-**Output:**
-```
-[0] SYSTEM (7 words)
-    Protected: negation (0%)
-    "You are a helpful financial analyst assistant."
-
-[1] CONTEXT (42 words) 
-    Header: "Context"
-    Protected: entity, number, negation (43%)
-    Protected spans: "Apple Inc", "$94.9 billion", "2024", "6%", "is not planning layoffs"
-
-[2] CONTEXT (18 words)
-    Inherited role from Context header
-    Protected: date, number, url (40%)
-    Protected spans: "$0.25", "November 14, 2024", "https://investor.apple.com/..."
-
-[3] QUESTION (13 words)
-    Header: "Question"
-    Protected: entity (15%)
-    Protected spans: "Services", "YoY"
-
-[4] FORMAT (17 words)
-    Protected: constraint, format, negation, number (99%)
-    Protected spans: "exactly 2 bullet points", "Do not include"
-```
-
-**Why this matters for compression:**
-- Segment [1] and [2] (CONTEXT) can be compressed heavily
-- Segment [3] (QUESTION) should NOT be compressed
-- Segment [4] (FORMAT) is 99% protected - very little to compress
-- All protected spans survive no matter what optimizer runs next
+Dependencies stay optional so the core runs without heavy libraries: `[tok]` tiktoken + tokenizers · `[nlp]` sentence-transformers, spaCy, nltk, torch · `[serve]` litellm, fastapi, uvicorn, streamlit · `[eval]` datasets, rouge-score, bert-score, llmlingua.
 
 ---
 
-### Example 2: Chat Messages
-```
-Input: examples/chat.json
+## 12. Progress log
 
-[System] "You are a concise travel assistant. Never recommend places..."
-[User] "I'm visiting Tokyo for 3 days in April."
-[Assistant] "Great! Do you prefer food, culture, or nightlife?"
-[User] "Mostly food and temples. Give me a day-by-day plan in markdown."
-```
+### ✅ M1 Segmenter (2026-11-15)
+- `segment(prompt)` accepts a string or OpenAI-style chat messages and returns a `SegmentedPrompt`.
+- Assigns 11 roles: system, instruction, context, example, question, format, code, data, history, tool_output, other.
+- Detects 12 protected span kinds (code, URL, email, path, placeholder, quoted, date, number, entity, negation, constraint, format). spaCy is optional for entities.
+- Reconstruction is exact: `to_text()` / `to_messages()`, with per-segment replacements.
+- CLI: `python -m aspo file [--json]`. About 244 ms for 200K characters.
 
-**Output:**
-```
-[0] SYSTEM (m0) - "You are a concise..." 
-    Protected: negation (55%)
-    
-[1] HISTORY (m1) - "I'm visiting Tokyo..."
-    Protected: entity, number (41%)
-    
-[2] HISTORY (m2) - "Great! Do you prefer..."
-    Protected: entity (10%)
-    
-[3] INSTRUCTION (m3) - "Mostly food and temples. Give me..."
-    Protected: constraint, format, number (81%)
-```
+### ✅ M2 Intent & Complexity Analyzer v1 (2026-11-16)
+- `analyze(prompt)` returns an `IntentAnalysis`: task (qa, rag_qa, summarization, code, reasoning, extraction, classification, transformation, creative, chitchat), confidence, per-task probabilities, complexity C ∈ [0,1] with its six factors, a feature vector, and human-readable evidence signals.
+- Method: lexical cues weighted by the role of the segment they occur in, plus structural features, combined in a linear model with softmax. QA is the residual class.
+- CLI: `python -m aspo.analyzer file [--json]`.
+- Pending: token-based length (after M0), prototype-embedding scorer, κ/F1 evaluation.
 
-**Why this matters:**
-- Earlier turns are marked HISTORY (can be compressed for context-limited models)
-- Final user message is fully segmented (detects the imperative "Give me" in a later sentence)
-- `to_messages()` can rebuild exactly, with replacements applied to specific message parts
+### ✎ Plan revision (2026-11-18)
+- Architecture changed to the validator-controlled learned removal policy (§0, §4, §5, §6, §7). No code changed in this revision.
 
----
+### ✎ Plan decisions (2026-11-20)
+- Formula references aligned with §6. Removal unit = words; training = one-shot REINFORCE; reward gate = H ∧ Q ∧ cos ≥ τ(C); start from LLMLingua-2 mBERT-base; laptop for development, Kaggle for full training. Soft spans are atomic removal units; in instruction-type segments only the detected spans are hard, other words are removable under NLI. No code changed.
 
-## 📈 Performance
-
-| Metric | Value |
-|--------|-------|
-| Segmentation speed | 244 ms for 200K chars (38K words) |
-| Number of segments | ~61 for the large test |
-| Test suite time | 0.11 seconds |
-| Lines of code (core) | ~1200 |
-| Lines of code (tests) | ~400 |
-| Test coverage | All public functions and error paths |
-
----
-
-## 🎯 Key Features Implemented
-
-✅ **Exact Text Reconstruction**
-- `segment(p).to_text() == p` for any valid prompt
-- Later modules call `to_text({id: replacement})` to swap segments
-
-✅ **Protected Span Detection**
-- 12 types of protected content
-- Relative offsets (safe for segment-level optimization)
-- Optional spaCy integration for better NER
-
-✅ **Chat Message Support**
-- Parses OpenAI-style messages
-- Handles multi-part content (text + images)
-- Rebuilds exact message format with `to_messages()`
-
-✅ **Role Classification**
-- 11 different roles
-- Multi-signal heuristics (structure, content, position)
-- Handles few-shot pairs and open queries
-
-✅ **CLI Tool**
-- `python -m aspo <file>` for interactive exploration
-- `--json` flag for programmatic output
-
----
-
-## ⏭️ Next Steps
-
-### Immediate (When building Module 2)
-
-1. **Create a tokenizer layer** (recommended before Module 2)
-   - File: `aspo/tokenizers.py`
-   - Use `tiktoken` for OpenAI models
-   - Use `transformers.AutoTokenizer` for open models
-   - Provide unified interface: `count_tokens(text, model_name)` → int
-   - Test that counts match official APIs
-
-2. **Build Module 2: Intent & Task Analyzer**
-   - File: `aspo/analyzer.py`
-   - Input: a segment or full prompt
-   - Output: task type (QA, RAG-QA, code, reasoning, summarization, etc.) + complexity score [0, 1]
-   - Start simple: embeddings + logistic regression
-   - Data labeling using Claude (LMSYS-Chat-1M subset)
-   - Tests: hand-check 100+ examples
-
----
-
-## 📚 Files Overview Summary
-
-| File | Lines | Purpose | Status |
-|------|-------|---------|--------|
-| `types.py` | 200 | Core data classes | ✅ |
-| `lexicon.py` | 100 | Word lists | ✅ |
-| `protected.py` | 300 | Span detection | ✅ |
-| `segmenter.py` | 600 | Main segmenter | ✅ |
-| `analyzer.py` | — | Task classification | ⏳ |
-| `importance.py` | — | Importance scoring | ⏳ |
-| `selector.py` | — | Budget allocation | ⏳ |
-| `optimizers/` | — | Compression operators | ⏳ |
-| `validator.py` | — | Quality checks | ⏳ |
-| `adapters.py` | — | Model interface | ⏳ |
-| `tests/` | 400 | Unit tests | ✅ |
-
----
-
-## 🔗 Research Links
-
-### Papers to Read (from the plan)
-- LLMLingua 1 & 2 (budget-driven compression)
-- LongLLMLingua (long-context optimization)
-- Selective Context (information-theoretic importance)
-- RECOMP (learned compression)
-- Gist Tokens (prompt caching optimization)
-- PCRL (prompt compression via reinforcement learning)
-
-### Datasets for Evaluation
-- GSM8K - mathematical reasoning
-- LongBench - long-context tasks
-- HumanEval / MBPP - code generation
-- MeetingBank - summarization
-- NaturalQuestions - open-domain QA
-
----
-
-## 📝 How to Use This For Your Paper
-
-1. **Related Work Section:** Compare against baselines mentioned in the plan
-2. **Contributions Section:** Highlight tokenizer-awareness as novel
-3. **Results Section:** Show Pareto curves (compression ratio vs quality)
-4. **Ablation Study:** Remove each module and measure impact
-5. **Viva Preparation:** Run the dashboard on sample prompts to demonstrate
-
----
-
-## ✨ Summary
-
-**What We Built:** A production-quality segmenter that understands prompt structure and protects critical content.
-
-**What It Enables:** Modules 2-7 can now work on segments without worrying about accidentally breaking negations, deleting code, or losing format instructions.
-
-**Why It's Research:** The protected-span detection alone is novel—few compression papers explicitly protect these types of content.
-
-**Next:** Module 2 (Intent Analyzer) should be built once the tokenizer layer is in place.
-
----
-
-Generated: 2026-11-15
+**Tests:** 81 passing (48 segmenter/protected-span + 33 analyzer). No new tests yet.
