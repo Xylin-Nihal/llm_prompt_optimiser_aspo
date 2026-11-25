@@ -99,8 +99,8 @@ Offline, the **policy training** loop (§7) produces π_θ. Online, π_θ is use
 - Knock-on: the analyzer's length factor switches from words to `T_M` tokens.
 
 ### M1 — Intake + Segmenter `aspo/segmenter.py`, `aspo/protected.py` ✅
-Built and tested (§12). Still to add:
-- Intake checks: non-empty, maximum-length limit, simple language check. Non-English prompts use a "safe" preset (removal limited to filler only) until the multilingual extension.
+Built and tested (§12). Two-tier mapping and intake (empty + context-window) done 2026-11-26. Still to add:
+- Simple language check. Non-English prompts use a "safe" preset (removal limited to filler only) until the multilingual extension.
 - **Two-tier protection** (span kinds are already detected; the tier mapping is new):
   - **Hard:** NEGATION, CONSTRAINT and FORMAT spans in any role; every detected protected span inside INSTRUCTION, QUESTION, FORMAT or SYSTEM segments, whatever its kind; CODE blocks; PLACEHOLDERs anywhere. These are never removed or altered. The policy masks them out. Only the spans are hard, not the whole segment: the other words in an INSTRUCTION, QUESTION, FORMAT or SYSTEM segment can still be removed, and the NLI check (N in formula (9)) guards those removals. The Q check only requires that each QUESTION and FORMAT segment is not removed entirely.
   - **Soft:** NUMBER, DATE, ENTITY, URL, EMAIL, PATH and QUOTED spans in CONTEXT, DATA, HISTORY, TOOL_OUTPUT or EXAMPLE segments. Each soft span is an **atomic unit**: all of its words are removed together or none are, so it is always either verbatim or entirely gone, never altered. Soft-span retention is reported as a metric.
@@ -351,4 +351,9 @@ Dependencies stay optional so the core runs without heavy libraries: `[tok]` tik
 - CLI: `python -m aspo.tokenizers file -m gpt-4o -m ollama/qwen2.5 ...`.
 - Extras: `[tok]` = tiktoken + tokenizers; `[serve]` = litellm.
 
-**Tests:** 124 passing (48 segmenter/protected-span + 33 analyzer + 43 tokenizer).
+### ✅ M1 additions: two-tier protection + intake (2026-11-26)
+- `Tier` (HARD/SOFT) on every `ProtectedSpan`; `span_tier(kind, role)` implements §5 M1 exactly. Decision: spans in OTHER segments are hard (an unclassified paragraph may be the task). A soft span overlapping a hard span is promoted to hard.
+- `Segment.removal_units()`: words, minus every word touching a hard span; the words of a soft span (or of overlapping soft spans) form one atomic unit. This is the unit M3/M4/M5 will score and remove.
+- `aspo/intake.py`: `check_intake(prompt, model, max_tokens=None)`. Empty prompts raise `EmptyPromptError`. Decision: the limit is the model's context window (`context_window(model)` in M0, LiteLLM `max_input_tokens`); a longer prompt returns `optimise=False, reason="too_long"` and is sent unchanged.
+
+**Tests:** 293 passing (48 segmenter/protected-span + 33 analyzer + 43 tokenizer + 151 tiers + 18 intake).

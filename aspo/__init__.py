@@ -1,11 +1,13 @@
 """ASPO - Adaptive Semantic Prompt Optimization Framework."""
 
 from .analyzer import AnalyzerConfig, IntentAnalyzer, analyze
+from .intake import EmptyPromptError, IntakeResult, check_intake
 from .protected import detect_protected_spans
 from .segmenter import Segmenter, SegmenterConfig, segment
 from .tokenizers import (
     ModelPrice,
     TokenizerInfo,
+    context_window,
     count_tokens,
     price_per_token,
     savings,
@@ -14,14 +16,21 @@ from .tokenizers import (
 from .types import (
     IntentAnalysis,
     ProtectedSpan,
+    RemovalUnit,
     Segment,
     SegmentedPrompt,
     SegmentRole,
     SpanKind,
     TaskType,
+    Tier,
+    span_tier,
 )
 
 __all__ = [
+    "check_intake",
+    "IntakeResult",
+    "EmptyPromptError",
+    "context_window",
     "count_tokens",
     "tokenizer_info",
     "price_per_token",
@@ -42,5 +51,8 @@ __all__ = [
     "SegmentRole",
     "SpanKind",
     "ProtectedSpan",
+    "Tier",
+    "span_tier",
+    "RemovalUnit",
 ]
 __version__ = "0.1.0"

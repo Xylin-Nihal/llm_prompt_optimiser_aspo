@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .lexicon import (
@@ -37,7 +37,10 @@ from .lexicon import (
     SECTION_KEYWORDS,
 )
 from .protected import detect_protected_spans
-from .types import ProtectedSpan, Segment, SegmentedPrompt, SegmentRole, Source, SpanKind
+from .types import (
+    ProtectedSpan, Segment, SegmentedPrompt, SegmentRole, Source, SpanKind, Tier, merge_intervals,
+    span_tier,
+)
 
 R = SegmentRole
 
@@ -428,6 +431,9 @@ class Segmenter:
         return segments
 
     def _protect(self, seg: Segment) -> list[ProtectedSpan]:
+        return _assign_tiers(self._detect(seg), seg.role)
+
+    def _detect(self, seg: Segment) -> list[ProtectedSpan]:
         if not self.config.detect_protected:
             return []
         if seg.role is R.CODE or seg.meta.get("cue"):
@@ -447,6 +453,18 @@ class Segmenter:
 
 
 # ======================================================== module-level helpers
+def _assign_tiers(spans: list[ProtectedSpan], role: SegmentRole) -> list[ProtectedSpan]:
+    """Set each span's tier from (kind, role). A soft span that overlaps a hard span
+    becomes hard: removing it as a unit would cut into the hard span."""
+    tiered = [replace(p, tier=span_tier(p.kind, role)) for p in spans]
+    hard = merge_intervals((p.start, p.end) for p in tiered if p.tier is Tier.HARD)
+    return [
+        replace(p, tier=Tier.HARD)
+        if p.tier is Tier.SOFT and any(s < p.end and p.start < e for s, e in hard) else p
+        for p in tiered
+    ]
+
+
 _DEFAULT = Segmenter()
 
 
@@ -591,10 +609,11 @@ def _describe(sp: SegmentedPrompt) -> str:
         preview = s.text.replace("\n", " ⏎ ")
         preview = preview if len(preview) <= 70 else preview[:67] + "..."
         where = f"m{s.message_index}" if s.message_index is not None else ""
-        prot = ", ".join(sorted({p.kind.value for p in s.protected}))
+        hard = ", ".join(sorted({p.kind.value for p in s.hard_spans}))
+        soft = ", ".join(sorted({p.kind.value for p in s.soft_spans}))
         rows.append(f"[{s.id:>2}] {where:<3} {s.role.value:<11} {s.word_count:>4}w "
                     f"prot={s.protected_ratio:>4.0%}  {preview}\n"
-                    f"{'':<24}protected: {prot or '-'}")
+                    f"{'':<24}hard: {hard or '-'}  |  soft: {soft or '-'}")
     return "\n".join(rows)
 
 

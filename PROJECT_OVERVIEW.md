@@ -144,7 +144,7 @@ This is done once, before the policy is used at run time.
 | Module | File | Status | What it does |
 |---|---|---|---|
 | **M0** Tokenizer layer | `aspo/tokenizers.py` | ✅ 2026-11-25 | `count_tokens(text, model)`: tiktoken for OpenAI models, Hugging Face tokenizers for open models, provider counting endpoint or a flagged approximation otherwise. `price_per_token(model)` from LiteLLM's cost table. LRU cache, because the loop counts tokens at every step. |
-| **M1** Intake + Segmenter | `aspo/segmenter.py`, `aspo/protected.py`, `aspo/types.py`, `aspo/lexicon.py` | ✅ 2026-11-15 | Accepts text or chat messages. Assigns 11 roles. Detects 12 span kinds. Exact reconstruction (`to_text()`, `to_messages()`). To add: intake checks and the hard/soft tier mapping (§7). |
+| **M1** Intake + Segmenter | `aspo/segmenter.py`, `aspo/protected.py`, `aspo/types.py`, `aspo/lexicon.py` | ✅ 2026-11-15 | Accepts text or chat messages. Assigns 11 roles. Detects 12 span kinds. Exact reconstruction (`to_text()`, `to_messages()`). Hard/soft tiers, removal units and intake checks (`aspo/intake.py`) added 2026-11-26. |
 | **M2** Intent & Complexity Analyzer | `aspo/analyzer.py` | ✅ v1 2026-11-16 | 10 task types (qa, rag_qa, summarization, code, reasoning, extraction, classification, transformation, creative, chitchat) with probabilities, plus complexity C (formula 2). Length in T_M tokens done (with M0). To add: the prototype term (2b), a 400-prompt labelled evaluation set. |
 | **M3** Pilot scorer | `aspo/scorer.py` | ⏳ | A cheap, non-learned scorer (IDF, or leave-one-out drift, formula 1). Proves the loop and validator work before the policy exists, and is a baseline in the ablations. |
 | **M4** Learned policy | `aspo/policy.py`, `training/` | ⏳ | LLMLingua-2-style classifier fine-tuned with one-shot REINFORCE (formulas 12–14). Hard-span words forced to keep. Re-run at every loop step. |
@@ -160,7 +160,7 @@ This is done once, before the policy is used at run time.
 
 ## 7. Protection rules (hard and soft spans)
 
-Protection has two tiers. The segmenter already detects the spans; the tier mapping below is what M1 still needs to add.
+Protection has two tiers. The segmenter detects the spans and assigns each one a tier (built 2026-11-26). Spans in OTHER segments are hard.
 
 ### Hard spans: never removed, never altered
 

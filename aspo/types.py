@@ -11,6 +11,7 @@ Offsets convention
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -63,15 +64,68 @@ ATOMIC_KINDS = frozenset(
 )
 
 
+class Tier(str, Enum):
+    """How strictly a protected span is protected (plan §5 M1, two-tier protection).
+
+    * HARD - never removed or altered; the scorer/policy masks it out and the
+      validator checks it is present verbatim.
+    * SOFT - may be removed, but only as one atomic unit: the span is always either
+      verbatim or entirely gone, never altered. Soft-span retention is a metric.
+    """
+
+    HARD = "hard"
+    SOFT = "soft"
+
+
+#: Roles whose every protected span is hard. OTHER is included because an
+#: unclassified paragraph may be the task itself (decided 2026-11-26).
+HARD_ROLES = frozenset({SegmentRole.SYSTEM, SegmentRole.INSTRUCTION, SegmentRole.QUESTION,
+                        SegmentRole.FORMAT, SegmentRole.OTHER, SegmentRole.CODE})
+
+#: Kinds that are hard in any role.
+ALWAYS_HARD_KINDS = frozenset({SpanKind.NEGATION, SpanKind.CONSTRAINT, SpanKind.FORMAT,
+                               SpanKind.CODE, SpanKind.PLACEHOLDER})
+
+
+def span_tier(kind: SpanKind, role: SegmentRole) -> Tier:
+    """Tier of a span of ``kind`` found in a segment of ``role``.
+
+    Hard: NEGATION/CONSTRAINT/FORMAT/CODE/PLACEHOLDER anywhere, and every span in
+    SYSTEM, INSTRUCTION, QUESTION, FORMAT, OTHER or CODE segments. Soft: what is
+    left, i.e. NUMBER, DATE, ENTITY, URL, EMAIL, PATH and QUOTED spans in CONTEXT,
+    DATA, HISTORY, TOOL_OUTPUT or EXAMPLE segments."""
+    return Tier.HARD if role in HARD_ROLES or kind in ALWAYS_HARD_KINDS else Tier.SOFT
+
+
 @dataclass(frozen=True, order=True)
 class ProtectedSpan:
     start: int
     end: int
     kind: SpanKind
     text: str = field(compare=False)
+    tier: Tier = field(default=Tier.HARD, compare=False)   # unknown -> safest
 
     def __len__(self) -> int:
         return self.end - self.start
+
+
+@dataclass(frozen=True)
+class RemovalUnit:
+    """The smallest piece the scorer/policy may remove: one word (a whitespace-
+    separated unit with its attached punctuation), or all words of one soft span
+    together. Offsets are relative to the segment text."""
+
+    start: int
+    end: int
+    text: str
+    soft_kinds: tuple[SpanKind, ...] = ()   # non-empty -> this unit is a soft span
+
+    @property
+    def is_soft_span(self) -> bool:
+        return bool(self.soft_kinds)
+
+
+_WORD = re.compile(r"\S+")
 
 
 @dataclass
@@ -113,6 +167,71 @@ class Segment:
         end = start + 1 if end is None else end
         return any(s < end and start < e for s, e in self.protected_intervals())
 
+    # ---------------------------------------------------------- two-tier protection
+    @property
+    def hard_spans(self) -> list[ProtectedSpan]:
+        return [p for p in self.protected if p.tier is Tier.HARD]
+
+    @property
+    def soft_spans(self) -> list[ProtectedSpan]:
+        return [p for p in self.protected if p.tier is Tier.SOFT]
+
+    def hard_intervals(self) -> list[tuple[int, int]]:
+        """Merged (start, end) intervals that must survive verbatim."""
+        return merge_intervals((p.start, p.end) for p in self.hard_spans)
+
+    def is_hard(self, start: int, end: int | None = None) -> bool:
+        """True if any character in [start, end) lies inside a hard span."""
+        end = start + 1 if end is None else end
+        return any(s < end and start < e for s, e in self.hard_intervals())
+
+    def removal_units(self) -> list[RemovalUnit]:
+        """The removable units of this segment, in order.
+
+        * A word that overlaps a hard span is hard and is not returned.
+        * The words that overlap a soft span form one unit (overlapping soft spans
+          merge into one unit). If any of those words is hard, the whole unit is
+          kept, so a soft span is never partly removed.
+        * Every other word is its own unit."""
+        hard = self.hard_intervals()
+
+        def overlaps(a: int, b: int, ivs) -> bool:
+            return any(s < b and a < e for s, e in ivs)
+
+        words = [(m.start(), m.end()) for m in _WORD.finditer(self.text)]
+        # each soft span -> the run of words it touches
+        groups: list[list[int]] = []   # [first word, last word, *span indexes]
+        soft = self.soft_spans
+        for k, p in enumerate(soft):
+            idx = [i for i, (a, b) in enumerate(words) if a < p.end and p.start < b]
+            if idx:
+                groups.append([idx[0], idx[-1], k])
+        groups.sort()
+        merged: list[list[int]] = []
+        for g in groups:
+            if merged and g[0] <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], g[1])
+                merged[-1].extend(g[2:])
+            else:
+                merged.append(g)
+
+        units: list[RemovalUnit] = []
+        i, gi = 0, 0
+        while i < len(words):
+            if gi < len(merged) and merged[gi][0] == i:
+                first, last, *ks = merged[gi]
+                a, b = words[first][0], words[last][1]
+                if not overlaps(a, b, hard):
+                    kinds = tuple(dict.fromkeys(soft[k].kind for k in sorted(ks)))
+                    units.append(RemovalUnit(a, b, self.text[a:b], kinds))
+                i, gi = last + 1, gi + 1
+                continue
+            a, b = words[i]
+            if not overlaps(a, b, hard):
+                units.append(RemovalUnit(a, b, self.text[a:b]))
+            i += 1
+        return units
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -126,7 +245,8 @@ class Segment:
             "header": self.header,
             "body_start": self.body_start,
             "protected": [
-                {"start": p.start, "end": p.end, "kind": p.kind.value, "text": p.text}
+                {"start": p.start, "end": p.end, "kind": p.kind.value, "tier": p.tier.value,
+                 "text": p.text}
                 for p in self.protected
             ],
             "meta": self.meta,

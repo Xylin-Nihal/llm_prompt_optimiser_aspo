@@ -42,7 +42,8 @@ from typing import Any, Callable, Protocol
 
 __all__ = [
     "TokenizerInfo", "ModelPrice", "count_tokens", "encode", "tokenizer_info",
-    "price_per_token", "prompt_cost", "savings", "calibrate", "register_tokenizer",
+    "price_per_token", "context_window", "prompt_cost", "savings", "calibrate",
+    "register_tokenizer",
     "clear_caches",
 ]
 
@@ -300,18 +301,37 @@ def _cost_table() -> tuple[dict[str, Any], str] | None:
     return litellm.model_cost, f"litellm {version} ({'bundled' if local else 'live'} table)"
 
 
-@lru_cache(maxsize=256)
-def price_per_token(model: str) -> ModelPrice | None:
-    """Prices in USD per token from LiteLLM's cost table, or None if LiteLLM is not
-    installed or the model is not in the table (cost is then reported as unknown)."""
+def _table_entries(model: str):
+    """(key, entry, source) for every cost-table key that may name ``model``:
+    as given, lower-cased, without the provider prefix, and the bare last part."""
     table = _cost_table()
     if table is None:
-        return None
+        return
     costs, source = table
     stripped = model.split("/", 1)[1] if "/" in model else model
     for key in dict.fromkeys((model, model.lower(), stripped, stripped.lower(), _short_name(model))):
         entry = costs.get(key)
-        if entry and entry.get("input_cost_per_token") is not None:
+        if entry:
+            yield key, entry, source
+
+
+@lru_cache(maxsize=256)
+def context_window(model: str) -> int | None:
+    """Maximum input tokens ``model`` accepts (LiteLLM's ``max_input_tokens``), or
+    None if unknown. Used by intake to pass over-long prompts through untouched."""
+    for _key, entry, _source in _table_entries(model):
+        n = entry.get("max_input_tokens")
+        if isinstance(n, (int, float)) and n > 0:
+            return int(n)
+    return None
+
+
+@lru_cache(maxsize=256)
+def price_per_token(model: str) -> ModelPrice | None:
+    """Prices in USD per token from LiteLLM's cost table, or None if LiteLLM is not
+    installed or the model is not in the table (cost is then reported as unknown)."""
+    for key, entry, source in _table_entries(model):
+        if entry.get("input_cost_per_token") is not None:
             return ModelPrice(
                 model=key,
                 input_per_token=float(entry["input_cost_per_token"]),
