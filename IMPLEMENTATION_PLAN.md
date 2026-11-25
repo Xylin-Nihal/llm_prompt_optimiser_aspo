@@ -4,7 +4,7 @@
 
 This plan is the single source of truth for the code and the paper. Where the paper draft and the plan disagree, the decision and the reason are recorded in §3.
 
-*Last updated: 2026-11-20 · Status: M1 Segmenter ✅ · M2 Analyzer (v1) ✅ · M0, validator, removal loop, policy ⏳*
+*Last updated: 2026-11-25 · Status: M0 Tokenizer ✅ · M1 Segmenter ✅ · M2 Analyzer (v1) ✅ · validator, removal loop, policy ⏳*
 
 ---
 
@@ -65,7 +65,7 @@ Two non-negotiable guarantees, for users and for the paper:
  App / user ──► [Proxy · Library · CLI · Dashboard]                          (M8)
                        │
                        ▼
- [M0 Tokenizer layer: T_M(·), prices]  ◄── used by every stage below
+ [M0 Tokenizer layer: T_M(·), prices]  ◄── used by every stage below         ✅
                        │
  [Gate] T_M(P) < T_min ? ──yes──► send P unchanged
                        │ no
@@ -91,7 +91,7 @@ Offline, the **policy training** loop (§7) produces π_θ. Online, π_θ is use
 
 ## 5. Modules
 
-### M0 — Tokenizer layer `aspo/tokenizers.py` ⏳ (next)
+### M0 — Tokenizer layer `aspo/tokenizers.py` ✅
 - `count_tokens(text, model) -> int`: `tiktoken` for OpenAI models; Hugging Face `AutoTokenizer` for open models (Llama-3.1, Qwen2.5). For closed models without a public tokenizer, use the provider's counting endpoint if one exists; otherwise a documented approximation, flagged in the report.
 - `price_per_token(model)`: input price from LiteLLM's cost table.
 - LRU cache on encodings, since the removal loop calls it at every step.
@@ -107,7 +107,7 @@ Built and tested (§12). Still to add:
 
 ### M2 — Intent & Complexity Analyzer `aspo/analyzer.py` ✅ v1
 Built: 10 task types, role-weighted lexical cues plus structural features, a softmax, a six-factor complexity score, explanation signals and a feature vector (§12). To add:
-- Length factor in target-model tokens (after M0).
+- ~~Length factor in target-model tokens (after M0).~~ Done 2026-11-25 (`AnalyzerConfig.target_model`).
 - **Prototype-embedding scorer:** 5–10 prototype prompts per task, embedded with `all-MiniLM-L6-v2`. The cosine to each task centroid is added to the rule logits (formula (2b) in §6). Optional dependency; falls back to rules only.
 - **Analyzer evaluation set:** 400 prompts from LMSYS-Chat-1M or ShareGPT, labelled independently by two people. Report Cohen's κ and macro-F1 for rules-only vs rules + prototypes. This is a paper table.
 - Role in the new design: the analyzer supplies the task type and C, which set the validator's strictness through τ(C).
@@ -138,7 +138,7 @@ Built: 10 task types, role-weighted lexical cues plus structural features, a sof
    - on failure, restore the last passing text and stop.
 3. **Optional lexical rewrite** (an extra, not a core claim): verbose-to-concise phrase substitutions, accepted only if they save tokens under the target tokenizer and pass NLI. Reported as a separate ablation.
 
-### M6 — Validator `aspo/validator.py` ⏳
+### M6 — Validator `aspo/validator.py` ⏳ (next)
 A candidate P′ passes (formula (9)) only if all of these hold:
 1. every hard span is present verbatim;
 2. every QUESTION and FORMAT segment is still present;
@@ -304,7 +304,8 @@ Contextual-bandit or RL budget policy over segments · fine-tuned DeBERTa analyz
 aspo/
   types.py lexicon.py protected.py segmenter.py     ✅
   analyzer.py                                       ✅ v1
-  tokenizers.py validator.py scorer.py policy.py optimizers.py
+  tokenizers.py                                     ✅
+  validator.py scorer.py policy.py optimizers.py
   adapters.py pipeline.py __init__.py __main__.py
 server.py          # FastAPI OpenAI-compatible proxy
 dashboard.py       # Streamlit demo
@@ -332,7 +333,7 @@ Dependencies stay optional so the core runs without heavy libraries: `[tok]` tik
 - `analyze(prompt)` returns an `IntentAnalysis`: task (qa, rag_qa, summarization, code, reasoning, extraction, classification, transformation, creative, chitchat), confidence, per-task probabilities, complexity C ∈ [0,1] with its six factors, a feature vector, and human-readable evidence signals.
 - Method: lexical cues weighted by the role of the segment they occur in, plus structural features, combined in a linear model with softmax. QA is the residual class.
 - CLI: `python -m aspo.analyzer file [--json]`.
-- Pending: token-based length (after M0), prototype-embedding scorer, κ/F1 evaluation.
+- Pending: prototype-embedding scorer, κ/F1 evaluation. (Token-based length done with M0.)
 
 ### ✎ Plan revision (2026-11-18)
 - Architecture changed to the validator-controlled learned removal policy (§0, §4, §5, §6, §7). No code changed in this revision.
@@ -340,4 +341,14 @@ Dependencies stay optional so the core runs without heavy libraries: `[tok]` tik
 ### ✎ Plan decisions (2026-11-20)
 - Formula references aligned with §6. Removal unit = words; training = one-shot REINFORCE; reward gate = H ∧ Q ∧ cos ≥ τ(C); start from LLMLingua-2 mBERT-base; laptop for development, Kaggle for full training. Soft spans are atomic removal units; in instruction-type segments only the detected spans are hard, other words are removable under NLI. No code changed.
 
-**Tests:** 81 passing (48 segmenter/protected-span + 33 analyzer). No new tests yet.
+### ✅ M0 Tokenizer layer (2026-11-25)
+- `count_tokens(text, model)` gives T_M. tiktoken for OpenAI models (exact; unknown GPT-like names assume o200k_base and are flagged). Hugging Face `tokenizers` for Llama-3.x and Qwen2/2.5 (exact; Llama is gated and needs `HF_TOKEN`, otherwise it falls back to the approximation and is flagged). Claude, Gemini and unknown models: o200k_base count × a per-family factor (1.0 until `calibrate()` is fitted against the provider's counting endpoint), `exact=False`.
+- `tokenizer_info(model)` says which tokenizer is used and whether it is exact. `encode()` returns ids (exact backends only). `register_tokenizer()` plugs in custom backends (for example a provider endpoint).
+- `price_per_token(model)` reads LiteLLM's **bundled** cost table (reproducible, no network), with input, output and cache-read prices. `ollama/*` is free. `prompt_cost()` and `savings()` report TR, CR and $ saved, with the tokenizer and price source.
+- LRU cache on (model, text) counts (16,384 entries): 0.8 ms for 5.8K tokens uncached, about 1 µs cached.
+- Counts are raw text with no BOS and no chat-template overhead (constant per message, so it cancels in before/after).
+- Analyzer: `AnalyzerConfig(target_model=...)` measures the length factor in T_M (saturates at 5,000 tokens), adds `total_tokens` to features, and the CLI takes `-m`.
+- CLI: `python -m aspo.tokenizers file -m gpt-4o -m ollama/qwen2.5 ...`.
+- Extras: `[tok]` = tiktoken + tokenizers; `[serve]` = litellm.
+
+**Tests:** 124 passing (48 segmenter/protected-span + 33 analyzer + 43 tokenizer).

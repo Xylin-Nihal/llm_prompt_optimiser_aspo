@@ -143,13 +143,13 @@ This is done once, before the policy is used at run time.
 
 | Module | File | Status | What it does |
 |---|---|---|---|
-| **M0** Tokenizer layer | `aspo/tokenizers.py` | ⏳ next | `count_tokens(text, model)`: tiktoken for OpenAI models, Hugging Face tokenizers for open models, provider counting endpoint or a flagged approximation otherwise. `price_per_token(model)` from LiteLLM's cost table. LRU cache, because the loop counts tokens at every step. |
+| **M0** Tokenizer layer | `aspo/tokenizers.py` | ✅ 2026-11-25 | `count_tokens(text, model)`: tiktoken for OpenAI models, Hugging Face tokenizers for open models, provider counting endpoint or a flagged approximation otherwise. `price_per_token(model)` from LiteLLM's cost table. LRU cache, because the loop counts tokens at every step. |
 | **M1** Intake + Segmenter | `aspo/segmenter.py`, `aspo/protected.py`, `aspo/types.py`, `aspo/lexicon.py` | ✅ 2026-11-15 | Accepts text or chat messages. Assigns 11 roles. Detects 12 span kinds. Exact reconstruction (`to_text()`, `to_messages()`). To add: intake checks and the hard/soft tier mapping (§7). |
-| **M2** Intent & Complexity Analyzer | `aspo/analyzer.py` | ✅ v1 2026-11-16 | 10 task types (qa, rag_qa, summarization, code, reasoning, extraction, classification, transformation, creative, chitchat) with probabilities, plus complexity C (formula 2). To add: length in T_M tokens, the prototype term (2b), a 400-prompt labelled evaluation set. |
+| **M2** Intent & Complexity Analyzer | `aspo/analyzer.py` | ✅ v1 2026-11-16 | 10 task types (qa, rag_qa, summarization, code, reasoning, extraction, classification, transformation, creative, chitchat) with probabilities, plus complexity C (formula 2). Length in T_M tokens done (with M0). To add: the prototype term (2b), a 400-prompt labelled evaluation set. |
 | **M3** Pilot scorer | `aspo/scorer.py` | ⏳ | A cheap, non-learned scorer (IDF, or leave-one-out drift, formula 1). Proves the loop and validator work before the policy exists, and is a baseline in the ablations. |
 | **M4** Learned policy | `aspo/policy.py`, `training/` | ⏳ | LLMLingua-2-style classifier fine-tuned with one-shot REINFORCE (formulas 12–14). Hard-span words forced to keep. Re-run at every loop step. |
 | **M5** Normalize + removal loop | `aspo/optimizers.py` | ⏳ | M5.1 normalize (whitespace, filler phrases, JSON minify; never Python or YAML). M5.2 the removal loop (formulas 10–11). M5.3 optional lexical rewrite (formula 7), reported as a separate ablation. |
-| **M6** Validator | `aspo/validator.py` | ⏳ | Four checks (formula 9) inside the loop, and a final check after it. |
+| **M6** Validator | `aspo/validator.py` | ⏳ next | Four checks (formula 9) inside the loop, and a final check after it. |
 | **M7** Model adapter | `aspo/adapters.py` | ⏳ | LiteLLM interface to OpenAI, Anthropic, Gemini, Ollama. Passes streaming through. Tells M0 which tokenizer and price apply. |
 | **M8** Delivery | `aspo/pipeline.py`, `server.py`, `dashboard.py`, `aspo/__main__.py` | ⏳ | Library, proxy (adds `X-TokenWise-*` headers), CLI, dashboard. Safeguards: overhead gate, fallback, logging off by default, `prefix_freeze` to keep provider prompt caching working. |
 | Eval harness | `eval/` | ⏳ | `datasets.py`, `baselines.py`, `metrics.py`, `run_benchmark.py`. Writes `results/*.csv` and plots. |

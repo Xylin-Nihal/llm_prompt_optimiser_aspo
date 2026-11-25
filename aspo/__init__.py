@@ -3,6 +3,14 @@
 from .analyzer import AnalyzerConfig, IntentAnalyzer, analyze
 from .protected import detect_protected_spans
 from .segmenter import Segmenter, SegmenterConfig, segment
+from .tokenizers import (
+    ModelPrice,
+    TokenizerInfo,
+    count_tokens,
+    price_per_token,
+    savings,
+    tokenizer_info,
+)
 from .types import (
     IntentAnalysis,
     ProtectedSpan,
@@ -14,6 +22,12 @@ from .types import (
 )
 
 __all__ = [
+    "count_tokens",
+    "tokenizer_info",
+    "price_per_token",
+    "savings",
+    "TokenizerInfo",
+    "ModelPrice",
     "Segmenter",
     "SegmenterConfig",
     "segment",

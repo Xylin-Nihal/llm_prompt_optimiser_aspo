@@ -33,6 +33,7 @@ from typing import Any
 
 from .lexicon import MULTISTEP_CUES, TASK_CUES
 from .segmenter import segment
+from .tokenizers import count_tokens
 from .types import IntentAnalysis, SegmentedPrompt, SegmentRole, SpanKind, TaskType, merge_intervals
 
 R = SegmentRole
@@ -84,7 +85,9 @@ _LIST_LINE = re.compile(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+")
 class AnalyzerConfig:
     context_min_words: int = 40          # supplied context this big turns QA into RAG-QA
     short_prompt_words: int = 12         # below this, a prompt with no task is chit-chat
-    long_prompt_words: float = 4000.0    # length factor saturates here
+    long_prompt_words: float = 4000.0    # length factor saturates here (no target model)
+    target_model: str | None = None      # if set, length is measured in T_M tokens (M0)
+    long_prompt_tokens: float = 5000.0   # length factor saturates here (with a target model)
     temperature: float = 1.0
     role_weights: dict[SegmentRole, float] = field(default_factory=lambda: dict(ROLE_WEIGHTS))
 
@@ -190,12 +193,18 @@ class IntentAnalyzer:
         if any(s.role is R.CODE for s in sp.segments):
             tech_chars += sum(len(s.text) for s in sp.by_role(R.CODE))
         roles_used = {s.role for s in sp.segments}
+        if cfg.target_model:   # T_M(P): length as the target model sees it
+            total_tokens = count_tokens(sp.to_text(), cfg.target_model)
+            length = math.log1p(total_tokens) / math.log1p(cfg.long_prompt_tokens)
+        else:                  # no model known: fall back to words
+            total_tokens = None
+            length = math.log1p(total_words) / math.log1p(cfg.long_prompt_words)
 
         factors = {
             "task": sum(scores[t] * TASK_DIFFICULTY[t] for t in TaskType),
             "reasoning": min(1.0, 0.25 * multistep_hits + 0.15 * (subtasks - 1)),
             "constraints": min(1.0, n_constraints / 6),
-            "length": min(1.0, math.log1p(total_words) / math.log1p(cfg.long_prompt_words)),
+            "length": min(1.0, length),
             "technical": min(1.0, 2.0 * tech_chars / total_chars),
             "structure": min(1.0, (len(roles_used) - 1) / 5),
         }
@@ -213,6 +222,7 @@ class IntentAnalyzer:
             "has_code": float(has_code),
             "has_question_segment": float(has_question_seg),
             "is_chat": float(sp.is_chat),
+            **({"total_tokens": total_tokens} if total_tokens is not None else {}),
             **{f"role_{r.value}": float(r in roles_used) for r in SegmentRole},
             **{f"cue_{t.value}": cue_logits[t] for t in TaskType},
         }
@@ -261,11 +271,12 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="ASPO Module 2: analyze a prompt's task and complexity.")
     ap.add_argument("file", nargs="?", help="prompt file (.txt, or .json chat messages); stdin if omitted")
     ap.add_argument("--json", action="store_true", help="print full JSON output")
+    ap.add_argument("-m", "--model", help="target model; measures length in its tokens (M0)")
     args = ap.parse_args(argv)
 
     raw = open(args.file, encoding="utf-8").read() if args.file else sys.stdin.read()
     prompt: Any = json.loads(raw) if args.file and args.file.endswith(".json") else raw
-    result = analyze(prompt)
+    result = analyze(prompt, AnalyzerConfig(target_model=args.model) if args.model else None)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False) if args.json else _describe(result))
