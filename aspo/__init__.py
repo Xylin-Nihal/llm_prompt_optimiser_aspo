@@ -25,8 +25,14 @@ from .types import (
     Tier,
     span_tier,
 )
+from .validator import CheckResult, ValidationResult, Validator, ValidatorConfig, tau
 
 __all__ = [
+    "Validator",
+    "ValidatorConfig",
+    "ValidationResult",
+    "CheckResult",
+    "tau",
     "check_intake",
     "IntakeResult",
     "EmptyPromptError",

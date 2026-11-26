@@ -13,7 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 tok = ["tiktoken>=0.7", "tokenizers>=0.19"]
 serve = ["litellm>=1.50"]
-nlp = ["spacy>=3.7"]
+nlp = ["spacy>=3.7", "sentence-transformers>=3.0"]
 dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
@@ -21,3 +21,4 @@ include = ["aspo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: loads real models (MiniLM, DeBERTa); deselect with -m 'not slow'"]

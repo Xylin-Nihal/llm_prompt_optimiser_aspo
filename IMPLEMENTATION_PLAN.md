@@ -4,7 +4,7 @@
 
 This plan is the single source of truth for the code and the paper. Where the paper draft and the plan disagree, the decision and the reason are recorded in §3.
 
-*Last updated: 2026-11-25 · Status: M0 Tokenizer ✅ · M1 Segmenter ✅ · M2 Analyzer (v1) ✅ · validator, removal loop, policy ⏳*
+*Last updated: 2026-11-27 · Status: M0 Tokenizer ✅ · M1 Segmenter ✅ (tiers + intake) · M2 Analyzer (v1) ✅ · M6 Validator ✅ · removal loop, pilot scorer, policy ⏳*
 
 ---
 
@@ -138,7 +138,7 @@ Built: 10 task types, role-weighted lexical cues plus structural features, a sof
    - on failure, restore the last passing text and stop.
 3. **Optional lexical rewrite** (an extra, not a core claim): verbose-to-concise phrase substitutions, accepted only if they save tokens under the target tokenizer and pass NLI. Reported as a separate ablation.
 
-### M6 — Validator `aspo/validator.py` ⏳ (next)
+### M6 — Validator `aspo/validator.py` ✅ (2026-11-27)
 A candidate P′ passes (formula (9)) only if all of these hold:
 1. every hard span is present verbatim;
 2. every QUESTION and FORMAT segment is still present;
@@ -148,6 +148,21 @@ A candidate P′ passes (formula (9)) only if all of these hold:
 Final check (after the loop): repeat checks 1–2 on the output, to catch any bug in the loop. If it fails, send the original P and log the reason.
 
 Validator frequency f: 1 in the pilot. Later, f is measured (for example 1, 2, 4, 8), and the accuracy loss and cost of each setting are reported.
+
+**Build plan (agreed 2026-11-27)**
+
+- **Input:** the original `SegmentedPrompt` plus `{segment_id: new_text}` (the format `to_text()` / `to_messages()` already take). The C value comes from M2.
+- **Check order:** H → Q → S → N, cheapest first. Short-circuit at the first failure inside the loop; `short_circuit=False` computes every value for the evaluation.
+- **H:** the merged hard intervals of each segment appear verbatim, in their original order, in that segment's new text.
+- **Q:** each QUESTION and FORMAT segment still has non-blank text.
+- **S:** cos(e(P), e(P′)) ≥ τ(C) = 0.80 + 0.15·C. **Decision: chunked mean.** e(P) = the length-weighted mean of MiniLM embeddings over chunks below 256 word pieces, taken segment by segment, because all-MiniLM-L6-v2 truncates at 256. Embeddings are cached by chunk text, so unchanged segments are free.
+- **N:** **Decision: built now, on by default, with a switch.** Bidirectional entailment, p ≥ 0.8, with `cross-encoder/nli-deberta-v3-small`, on every changed segment whose role is INSTRUCTION, QUESTION, FORMAT, SYSTEM or **OTHER** (decision: OTHER included, matching its hard tier). Cached by (premise, hypothesis).
+- **Final check:** H and Q on the rebuilt output text or messages. If it fails, the original is returned with the reason.
+- **Output:** `ValidationResult`: `passed`, the first failed check (used as the stop reason), and for each check its value, threshold, details and time. Also reports soft-span retention as a metric.
+- **Ablation hooks:** turn each check on or off; set τ0, τ1 and the NLI threshold; `gate()` = H ∧ Q ∧ S (the M4 reward gate G).
+- **Models:** the embedder and the NLI model sit behind small interfaces. Unit tests use fake deterministic models; integration tests use the real ones (skipped if they are not installed). GPU if available. **Decision: CUDA build of PyTorch** in `.venv`, which M4 needs anyway.
+- **Files:** `aspo/validator.py`, `tests/test_validator.py`. sentence-transformers goes in the `[nlp]` extra.
+- **Risks to measure:** NLI may score shortened text too low and reject too often (measure on the examples). DeBERTa truncates at 512 tokens, so very long instruction segments are only partly checked.
 
 ### M7 — Model Adapter `aspo/adapters.py` ⏳
 LiteLLM, giving one interface for OpenAI, Anthropic, Gemini and Ollama. Passes streaming through unchanged. Tells M0 which tokenizer and prices apply to the target model.
@@ -305,7 +320,8 @@ aspo/
   types.py lexicon.py protected.py segmenter.py     ✅
   analyzer.py                                       ✅ v1
   tokenizers.py                                     ✅
-  validator.py scorer.py policy.py optimizers.py
+  intake.py validator.py                            ✅
+  scorer.py policy.py optimizers.py
   adapters.py pipeline.py __init__.py __main__.py
 server.py          # FastAPI OpenAI-compatible proxy
 dashboard.py       # Streamlit demo
@@ -356,4 +372,13 @@ Dependencies stay optional so the core runs without heavy libraries: `[tok]` tik
 - `Segment.removal_units()`: words, minus every word touching a hard span; the words of a soft span (or of overlapping soft spans) form one atomic unit. This is the unit M3/M4/M5 will score and remove.
 - `aspo/intake.py`: `check_intake(prompt, model, max_tokens=None)`. Empty prompts raise `EmptyPromptError`. Decision: the limit is the model's context window (`context_window(model)` in M0, LiteLLM `max_input_tokens`); a longer prompt returns `optimise=False, reason="too_long"` and is sent unchanged.
 
-**Tests:** 293 passing (48 segmenter/protected-span + 33 analyzer + 43 tokenizer + 151 tiers + 18 intake).
+### ✅ M6 Validator (2026-11-27)
+- `Validator.validate(sp, replacements, C)` implements formula (9): H → Q → S → N, short-circuiting at the first failure (`short_circuit=False` computes every value). `gate()` = H ∧ Q ∧ S (reward gate G, formula (12)). `similarity()` exposes cos(e(P), e(P′)). `final_check(sp, replacements, output)` re-runs H and Q on the rebuilt text or messages.
+- S uses the chunked mean e(P) = Σ n_c·e(c) / Σ n_c over chunks below 254 word pieces per segment; chunk embeddings are cached, so unchanged segments are free. τ(C) = 0.80 + 0.15·C (C clamped).
+- N: bidirectional entailment with `cross-encoder/nli-deberta-v3-small` (labels: contradiction / entailment / neutral, softmax over logits) on changed INSTRUCTION, QUESTION, FORMAT, SYSTEM and OTHER segments. Results cached.
+- `ValidationResult`: passed, first failed check (stop reason), and for each check its value, threshold, details and time; soft-span retention as a metric.
+- Real models are loaded lazily (`import aspo` stays at 0.07 s). PyTorch 2.11 + CUDA 12.8 and sentence-transformers 6.3 are in `.venv`; the RTX 4050 is used.
+- Measured (RTX 4050, warm): H and Q < 0.1 ms; S ≈ 40–50 ms per step; N ≈ 100 ms per changed instruction segment (pairs batched). Cold start: MiniLM ≈ 2 s, DeBERTa ≈ 10 s.
+- **Finding (risk confirmed):** the backward NLI direction (P′ ⊨ P) is unreliable on imperatives. "Summarize the following article in 3 bullet points." → "Summarize the article in 3 bullet points." scored 0.011, while the more telegraphic "Summarize article 3 bullet points." scored 0.455. Dropping politeness ("Could you please kindly …") passed at 0.96–0.99. With threshold 0.8, N will reject most instruction edits. Decision pending (see BACKLOG.md M6).
+
+**Tests:** 327 passing (48 segmenter/protected-span + 33 analyzer + 43 tokenizer + 151 tiers + 18 intake + 34 validator, 3 of which load the real models and are marked `slow`).

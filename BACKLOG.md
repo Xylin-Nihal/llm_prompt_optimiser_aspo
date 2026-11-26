@@ -13,7 +13,7 @@ How to read this file:
 
 Tick the boxes as items are done, and add new items as modules are built.
 
-*Last updated: 2026-11-26 · built: M0, M1 (incl. tiers + intake), M2 v1 · next: M6 validator*
+*Last updated: 2026-11-27 · built: M0, M1 (incl. tiers + intake), M2 v1, M6 · next: M3 pilot scorer + M5 loop*
 
 ---
 
@@ -124,22 +124,28 @@ Tick the boxes as items are done, and add new items as modules are built.
 
 ---
 
-## M6 — Validator `aspo/validator.py` ⏳ (next)
+## M6 — Validator `aspo/validator.py` ✅
 
-**MVP scope:**
+**Open work**
 
-- checks 1 (hard spans verbatim) and 2 (QUESTION and FORMAT segments still present);
-- check 3 (cosine ≥ τ(C), using MiniLM);
-- the final check, with fallback to the original prompt;
-- a unit test for each check.
+- [ ] **[MVP]** **Decide what to do about the NLI check (N).** Measured on 2026-11-27: the backward direction (does the shortened instruction entail the original?) scores imperatives very low. Dropping "following" from "Summarize the following article in 3 bullet points" scored 0.011, while dropping politeness phrases passed (0.96–0.99). At p ≥ 0.8, N will block almost every edit to instructions, so in practice only context is compressed. Options:
+  - keep it as is, and report N as conservative;
+  - lower the threshold, tuned on the validation split;
+  - forward direction plus the similarity check only;
+  - rewrite instructions as statements ("The task is to …") before running NLI;
+  - try a larger NLI model (`nli-deberta-v3-base`).
+- [ ] **[post-MVP]** Speed up S. About 40–50 ms per step comes mostly from one MiniLM call per changed chunk; batch the candidates of several steps, or move the vector maths to numpy or torch.
+- [ ] **[paper]** Validator precision and recall against human labels. Validator on vs off. Cosine-only vs cosine + NLI. Frequency sweep f ∈ {1, 2, 4, 8}.
+- [ ] **[post-MVP]** Tune τ0, τ1 and the NLI threshold on the validation split.
 
-**Open work after the MVP version**
+**Limitations**
 
-- [ ] **[post-MVP]** Check 4: bidirectional NLI with `cross-encoder/nli-deberta-v3-small`, p ≥ 0.8, on changed instruction-bearing segments. It can be off in the MVP if latency is too high, but it is needed for the paper.
-- [ ] **[paper]** Validator precision and recall against human labels. Validator on vs off. Cosine-only vs cosine + NLI.
-- [ ] **[post-MVP]** Tune τ0, τ1 and T_min on the validation split.
-
-**Limitation to state:** the validator is a proxy for answer quality, not a guarantee.
+- The validator is a proxy for answer quality, not a guarantee.
+- DeBERTa reads at most 512 tokens, so a very long instruction segment is only partly checked.
+- H checks that each hard span appears verbatim and in order inside its segment. It does not check that the hard span still sits next to the same words.
+- Soft-span retention is measured by substring match, so the same text appearing elsewhere in the segment can count as "kept".
+- The chunked-mean embedding is a design choice (all-MiniLM-L6-v2 truncates at 256 word pieces). State it in the paper's formula for e(·).
+- Cold start: MiniLM takes about 2 s and DeBERTa about 10 s to load on first use. Load them once per process (proxy start-up).
 
 ---
 

@@ -149,7 +149,7 @@ This is done once, before the policy is used at run time.
 | **M3** Pilot scorer | `aspo/scorer.py` | ⏳ | A cheap, non-learned scorer (IDF, or leave-one-out drift, formula 1). Proves the loop and validator work before the policy exists, and is a baseline in the ablations. |
 | **M4** Learned policy | `aspo/policy.py`, `training/` | ⏳ | LLMLingua-2-style classifier fine-tuned with one-shot REINFORCE (formulas 12–14). Hard-span words forced to keep. Re-run at every loop step. |
 | **M5** Normalize + removal loop | `aspo/optimizers.py` | ⏳ | M5.1 normalize (whitespace, filler phrases, JSON minify; never Python or YAML). M5.2 the removal loop (formulas 10–11). M5.3 optional lexical rewrite (formula 7), reported as a separate ablation. |
-| **M6** Validator | `aspo/validator.py` | ⏳ next | Four checks (formula 9) inside the loop, and a final check after it. |
+| **M6** Validator | `aspo/validator.py` | ✅ 2026-11-27 | Four checks (formula 9) inside the loop, and a final check after it. |
 | **M7** Model adapter | `aspo/adapters.py` | ⏳ | LiteLLM interface to OpenAI, Anthropic, Gemini, Ollama. Passes streaming through. Tells M0 which tokenizer and price apply. |
 | **M8** Delivery | `aspo/pipeline.py`, `server.py`, `dashboard.py`, `aspo/__main__.py` | ⏳ | Library, proxy (adds `X-TokenWise-*` headers), CLI, dashboard. Safeguards: overhead gate, fallback, logging off by default, `prefix_freeze` to keep provider prompt caching working. |
 | Eval harness | `eval/` | ⏳ | `datasets.py`, `baselines.py`, `metrics.py`, `run_benchmark.py`. Writes `results/*.csv` and plots. |
