@@ -143,7 +143,7 @@ A candidate P′ passes (formula (9)) only if all of these hold:
 1. every hard span is present verbatim;
 2. every QUESTION and FORMAT segment is still present;
 3. cos(e(P), e(P′)) ≥ τ(C);
-4. every instruction-bearing segment changed by a removal or rewrite passes bidirectional NLI entailment against its original (`cross-encoder/nli-deberta-v3-small`, p ≥ 0.8).
+4. every instruction-bearing segment changed by a removal or rewrite passes bidirectional NLI entailment against its original (`cross-encoder/nli-deberta-v3-small`, p ≥ 0.05, chosen by `eval/nli_probe.py`).
 
 Final check (after the loop): repeat checks 1–2 on the output, to catch any bug in the loop. If it fails, send the original P and log the reason.
 
@@ -156,7 +156,7 @@ Validator frequency f: 1 in the pilot. Later, f is measured (for example 1, 2, 4
 - **H:** the merged hard intervals of each segment appear verbatim, in their original order, in that segment's new text.
 - **Q:** each QUESTION and FORMAT segment still has non-blank text.
 - **S:** cos(e(P), e(P′)) ≥ τ(C) = 0.80 + 0.15·C. **Decision: chunked mean.** e(P) = the length-weighted mean of MiniLM embeddings over chunks below 256 word pieces, taken segment by segment, because all-MiniLM-L6-v2 truncates at 256. Embeddings are cached by chunk text, so unchanged segments are free.
-- **N:** **Decision: built now, on by default, with a switch.** Bidirectional entailment, p ≥ 0.8, with `cross-encoder/nli-deberta-v3-small`, on every changed segment whose role is INSTRUCTION, QUESTION, FORMAT, SYSTEM or **OTHER** (decision: OTHER included, matching its hard tier). Cached by (premise, hypothesis).
+- **N:** **Decision: built now, on by default, with a switch.** Bidirectional entailment, p ≥ 0.05 (was 0.8; see the 2026-11-27 NLI decision below), with `cross-encoder/nli-deberta-v3-small`, on every changed segment whose role is INSTRUCTION, QUESTION, FORMAT, SYSTEM or **OTHER** (decision: OTHER included, matching its hard tier). Cached by (premise, hypothesis).
 - **Final check:** H and Q on the rebuilt output text or messages. If it fails, the original is returned with the reason.
 - **Output:** `ValidationResult`: `passed`, the first failed check (used as the stop reason), and for each check its value, threshold, details and time. Also reports soft-span retention as a metric.
 - **Ablation hooks:** turn each check on or off; set τ0, τ1 and the NLI threshold; `gate()` = H ∧ Q ∧ S (the M4 reward gate G).
@@ -199,7 +199,7 @@ LiteLLM, giving one interface for OpenAI, Anthropic, Gemini and Ollama. Passes s
 (9)   V(P′)    = 1  iff  H(P′) ∧ Q(P′) ∧ [cos(e(P), e(P′)) ≥ τ(C)] ∧ N(P′)
         H: every hard span present verbatim
         Q: every QUESTION and FORMAT segment present
-        N: bidirectional NLI entailment, p ≥ 0.8, for every changed instruction segment
+        N: bidirectional NLI entailment, p ≥ 0.05, for every changed instruction segment
 (10)  Removal loop:  P_0 = Normalize(P);  for t = 1, 2, …
         R_t   = removable units of P_{t−1}       (words not overlapping a hard span; each soft span = one unit)
         k_t   = max(1, ⌈0.05·|R_t|⌉) units        (default; swept over fixed k ∈ {1, 4, 16, 64})
@@ -379,6 +379,14 @@ Dependencies stay optional so the core runs without heavy libraries: `[tok]` tik
 - `ValidationResult`: passed, first failed check (stop reason), and for each check its value, threshold, details and time; soft-span retention as a metric.
 - Real models are loaded lazily (`import aspo` stays at 0.07 s). PyTorch 2.11 + CUDA 12.8 and sentence-transformers 6.3 are in `.venv`; the RTX 4050 is used.
 - Measured (RTX 4050, warm): H and Q < 0.1 ms; S ≈ 40–50 ms per step; N ≈ 100 ms per changed instruction segment (pairs batched). Cold start: MiniLM ≈ 2 s, DeBERTa ≈ 10 s.
-- **Finding (risk confirmed):** the backward NLI direction (P′ ⊨ P) is unreliable on imperatives. "Summarize the following article in 3 bullet points." → "Summarize the article in 3 bullet points." scored 0.011, while the more telegraphic "Summarize article 3 bullet points." scored 0.455. Dropping politeness ("Could you please kindly …") passed at 0.96–0.99. With threshold 0.8, N will reject most instruction edits. Decision pending (see BACKLOG.md M6).
+- **Finding (risk confirmed):** the backward NLI direction (P′ ⊨ P) is unreliable on imperatives. "Summarize the following article in 3 bullet points." → "Summarize the article in 3 bullet points." scored 0.011, while the more telegraphic "Summarize article 3 bullet points." scored 0.455. Dropping politeness ("Could you please kindly …") passed at 0.96–0.99. With threshold 0.8, N will reject most instruction edits. 
 
-**Tests:** 327 passing (48 segmenter/protected-span + 33 analyzer + 43 tokenizer + 151 tiers + 18 intake + 34 validator, 3 of which load the real models and are marked `slow`).
+### ✅ M6 NLI decision: raw text, threshold 0.05 (2026-11-27)
+- Probe `eval/nli_probe.py`: 48 hand-labelled instruction edits made by deletion only. 24 keep the task (politeness, filler, articles, "following"); 24 lose part of it (a dropped qualifier, object, audience or language: "short", "five", "Python", "formal", "in simple terms" …). Scored with DeBERTa-v3-small: raw text vs three statement rewrites applied to both sides ("The task is to …", "The user asks the assistant to …", 'The user said: "…"').
+- Separation (AUC of min(fwd, bwd), ok vs bad): raw 0.990, task 0.979, asks 0.984, said 0.990. The NLI score already ranks the edits almost perfectly; the 0.8 threshold was the problem, not the model.
+- Keep / leak (ok edits passed / bad edits passed) at thresholds 0.01 · 0.02 · **0.05** · 0.1 · 0.5 · 0.8: raw 92/8 · 88/4 · **88/0** · 83/0 · 71/0 · 46/0; the best rewrite (said) 83/4 · 75/0 · 75/0 · 71/0 · 50/0 · 50/0. Rewriting is worse at every threshold: it lowered several good edits (e.g. "translate the sentence into French" from 0.90 to 0.004 under "task").
+- **Decision: option 2 (lower the threshold) on raw text; option 4 (statement rewrite) rejected.** Default `nli_threshold = 0.05`: 88% of good edits pass, 0% of bad. Bad edits score 0.000–0.037; the 3 good edits still rejected ("Summarize the article in 3 bullet points." 0.011, "Summarize article in 3 bullet points." 0.008, "include a brief explanation…" 0.006) are a conservative miss, not a leak.
+- The forward direction (P ⊨ P′) is ≈1 for every deletion (AUC 0.65), so on deletions N is decided by the backward direction. Forward is kept because it costs nothing (batched) and guards the optional rewrite (M5.3), which can add words.
+- Caveat: 48 pairs, written by us, threshold chosen on the same set. Re-tune on the validation split with real loop candidates (BACKLOG M6).
+
+**Tests:** 328 passing (48 segmenter/protected-span + 33 analyzer + 43 tokenizer + 151 tiers + 18 intake + 35 validator, 4 of which load the real models and are marked `slow`).

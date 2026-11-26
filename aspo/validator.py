@@ -67,7 +67,9 @@ class ValidatorConfig:
     # thresholds
     tau0: float = 0.80                 # τ(0): simplest prompt
     tau1: float = 0.95                 # τ(1): most complex prompt
-    nli_threshold: float = 0.80
+    nli_threshold: float = 0.05        # chosen by eval/nli_probe.py (2026-11-27): DeBERTa-small
+                                       # scores lost qualifiers ≈0.00–0.04, kept-meaning edits mostly
+                                       # >0.05; at 0.80 it rejected half the meaning-preserving edits
     nli_roles: frozenset[SegmentRole] = NLI_ROLES
     question_roles: frozenset[SegmentRole] = QUESTION_ROLES
     # behaviour

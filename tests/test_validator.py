@@ -250,7 +250,7 @@ def test_nli_runs_only_on_changed_instruction_segments(sp):
 
 
 def test_nli_is_bidirectional(sp):
-    v, *_ = make(check_similarity=False)
+    v, *_ = make(check_similarity=False, nli_threshold=0.8)   # fake NLI: overlap share
     ins = seg(sp, R.INSTRUCTION)
     # forward passes (premise ⊇ hypothesis words) but backward loses too much -> fail
     short = "Summarize the report"
@@ -394,6 +394,15 @@ def test_real_nli_accepts_paraphrase_rejects_meaning_change():
     same = v.nli.entailment([("Write a short poem about cats.", "Write a short poem about cats.")])[0]
     diff = v.nli.entailment([("Write a short poem about cats.", "Write a short poem about dogs.")])[0]
     assert same > 0.8 and diff < 0.5
+
+
+@pytest.mark.slow
+def test_real_nli_default_threshold_separates_filler_from_lost_qualifier():
+    v = _real()
+    thr = v.config.nli_threshold
+    polite = v.nli.entailment([("summarize the article below.", "Please summarize the article below.")])[0]
+    lost = v.nli.entailment([("Write a poem about the ocean.", "Write a short poem about the ocean.")])[0]
+    assert polite >= thr > lost      # backward direction: P' ⊨ P
 
 
 @pytest.mark.slow

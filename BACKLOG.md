@@ -128,19 +128,16 @@ Tick the boxes as items are done, and add new items as modules are built.
 
 **Open work**
 
-- [ ] **[MVP]** **Decide what to do about the NLI check (N).** Measured on 2026-11-27: the backward direction (does the shortened instruction entail the original?) scores imperatives very low. Dropping "following" from "Summarize the following article in 3 bullet points" scored 0.011, while dropping politeness phrases passed (0.96–0.99). At p ≥ 0.8, N will block almost every edit to instructions, so in practice only context is compressed. Options:
-  - keep it as is, and report N as conservative;
-  - lower the threshold, tuned on the validation split;
-  - forward direction plus the similarity check only;
-  - rewrite instructions as statements ("The task is to …") before running NLI;
-  - try a larger NLI model (`nli-deberta-v3-base`).
+- [x] **NLI check decision** (done 2026-11-27, `eval/nli_probe.py`). Raw text, threshold lowered from 0.8 to **0.05**. On 48 labelled deletion edits: 88% of meaning-preserving edits pass and 0% of meaning-losing ones (at 0.8: 46% / 0%). Rewriting instructions as statements was tested with three templates and was worse at every threshold, so it was rejected. Details in IMPLEMENTATION_PLAN.md progress log.
+- [ ] **[paper]** Re-tune the NLI threshold on the validation split with real loop candidates; the 0.05 comes from a 48-pair set we wrote ourselves. Optionally compare `nli-deberta-v3-base`.
 - [ ] **[post-MVP]** Speed up S. About 40–50 ms per step comes mostly from one MiniLM call per changed chunk; batch the candidates of several steps, or move the vector maths to numpy or torch.
 - [ ] **[paper]** Validator precision and recall against human labels. Validator on vs off. Cosine-only vs cosine + NLI. Frequency sweep f ∈ {1, 2, 4, 8}.
-- [ ] **[post-MVP]** Tune τ0, τ1 and the NLI threshold on the validation split.
+- [ ] **[post-MVP]** Tune τ0 and τ1 on the validation split.
 
 **Limitations**
 
 - The validator is a proxy for answer quality, not a guarantee.
+- DeBERTa-small's entailment probabilities are poorly calibrated on imperatives: a harmless deletion can score 0.01. The low threshold (0.05) works because meaning-losing deletions score near 0.000, but about 1 in 8 harmless instruction edits is still rejected (conservative).
 - DeBERTa reads at most 512 tokens, so a very long instruction segment is only partly checked.
 - H checks that each hard span appears verbatim and in order inside its segment. It does not check that the hard span still sits next to the same words.
 - Soft-span retention is measured by substring match, so the same text appearing elsewhere in the segment can count as "kept".
